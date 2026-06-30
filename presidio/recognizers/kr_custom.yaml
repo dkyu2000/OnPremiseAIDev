@@ -1,0 +1,53 @@
+# presidio/recognizers/kr_custom.yaml
+# Presidio analyzer 커스텀 recognizer 레지스트리 (FR-6)
+#
+# 목적: LiteLLM Presidio 가드레일(litellm/config.yaml)이 사용하는 두 커스텀 엔티티를
+#       presidio-analyzer 가 인식하도록 PatternRecognizer 를 정의한다.
+#         - KR_RRN    : 주민등록번호  → (LiteLLM에서) MASK
+#         - DB_SECRET : DB 비밀번호/시크릿/커넥션 시크릿 → (LiteLLM에서) BLOCK → 422
+#
+# 반입(중요): 이 파일은 LiteLLM 이 아니라 **presidio-analyzer 컨테이너**가 로드해야 한다.
+#   docker-compose.yml 의 presidio-analyzer 서비스에서:
+#     volumes: ./presidio/recognizers:/opt/presidio/recognizers:ro
+#     environment: RECOGNIZER_REGISTRY_CONF_FILE=/opt/presidio/recognizers/kr_custom.yaml
+#   (자세한 절차/검증은 presidio/README.md 참조)
+#
+# 언어 주의: LiteLLM Presidio 통합은 기본 language="en" 으로 /analyze 를 호출한다.
+#   한국어 텍스트라도 PatternRecognizer 는 정규식으로 매칭되므로 supported_languages 는 en 으로 둔다.
+
+# DOTALL(16) | MULTILINE(8) | IGNORECASE(2) = 26  → 대소문자 무시 등 전역 플래그
+global_regex_flags: 26
+
+supported_languages:
+  - en
+
+recognizers:
+  # ── 주민등록번호 (KR Resident Registration Number) ──────────────────────────
+  - name: "KR_RRN_Recognizer"
+    type: custom
+    supported_entity: "KR_RRN"
+    patterns:
+      # 표준 표기: 6자리-(성별1자리 1~8)+6자리.  하이픈/공백 선택.
+      - name: "rrn_dash"
+        regex: "\\b\\d{6}[-\\s]?[1-8]\\d{6}\\b"
+        score: 0.9
+    supported_languages:
+      - language: en
+        context: ["주민", "주민등록", "주민번호", "rrn", "resident"]
+
+  # ── DB 비밀번호 / 시크릿 / 커넥션 시크릿 ─────────────────────────────────────
+  - name: "DB_SECRET_Recognizer"
+    type: custom
+    supported_entity: "DB_SECRET"
+    patterns:
+      # key=value 형태의 비밀번호/시크릿 (password=, pwd=, secret:, db_pass= 등)
+      - name: "kv_secret"
+        regex: "(password|passwd|pwd|secret|db[_-]?pass(word)?)\\s*[:=]\\s*\\S{4,}"
+        score: 0.8
+      # DB 커넥션 스트링 내 자격증명 (scheme://user:pass@host)
+      - name: "conn_string_secret"
+        regex: "(postgres(ql)?|mysql|mariadb|mongodb|redis|jdbc:[a-z]+)://[^\\s:@/]+:[^\\s:@/]+@"
+        score: 0.85
+    supported_languages:
+      - language: en
+        context: ["비밀번호", "비번", "패스워드", "password", "secret", "db", "접속", "커넥션"]

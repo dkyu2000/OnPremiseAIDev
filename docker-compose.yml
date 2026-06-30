@@ -1,0 +1,251 @@
+# docker-compose.yml
+# 폐쇄망 On-Premise AI 검증 스택 (단일 GPU / RTX 5090 32GB / Blackwell SM120)
+# 호스트 전제: NVIDIA Driver 570+ / nvidia-container-toolkit 설치됨 (드라이버는 호스트 직접 설치, 컨테이너화 불가)
+#
+# Compose 프로파일로 Phase를 분리한다 (VRAM 32GB라 동시 실행 불가 조합 존재):
+#   docker compose --profile phase-a up -d   # core + vllm-main (단일 모델 + 거버넌스 검증)
+#   docker compose --profile phase-b up -d   # core + vllm-main + vllm-sub (2-트랙 라우팅)
+#   docker compose --profile phase-c up -d   # core + vllm-gemma27b (운영 서브 모델 실검증, ★단독 실행)
+# core 서비스(postgres/presidio/litellm)는 프로파일이 없어 항상 기동된다.
+#
+# ⚠ 모든 이미지/모델 가중치는 사전 스테이징(오프라인 반입)된 것만 사용한다. (REQUIREMENTS FR-10 / NFR-1)
+# ⚠ 이미지 태그는 빌드 시점에 확정 후 .env에 고정한다. latest 금지. (NFR-2)
+
+# vLLM 공통 환경변수 (attention 백엔드는 서비스별로 분리 → 아래 environment 에서 << 병합)
+# ★Blackwell+Gemma2 주의: Gemma 2는 logit soft-capping 때문에 FlashAttention2 빌드가 softcap 미지원이면
+#   기동 실패하거나 FlashInfer 백엔드를 요구한다. 따라서 모든 모델에 FA2를 일괄 강제하지 않고,
+#   main(Llama)=FA2 / sub·prod(Gemma2)=GEMMA_ATTN_BACKEND(기본 FLASHINFER) 로 나눈다. (TEST_PLAN 검증항목)
+x-vllm-env: &vllm-env
+  HF_HUB_OFFLINE: "1"                     # 폐쇄망: 외부 조회 차단
+  TRANSFORMERS_OFFLINE: "1"
+  CUDA_VISIBLE_DEVICES: "0"
+
+x-vllm-common: &vllm-common
+  # 공식 vLLM 이미지. ★빌드 시점에 SM120 FP8 지원(v0.17.0+) 버전인지 확인 후 .env의 VLLM_IMAGE에 고정.
+  # 공식 이미지로 SM120 이슈 발생 시 NGC(nvcr.io/nvidia/pytorch:25.xx)에서 빌드한 이미지로 교체.
+  image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.17.1}
+  ipc: host                      # vLLM은 큰 shared memory 필요
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  restart: unless-stopped
+  networks: [ai-net]
+  volumes:
+    - ${MODELS_DIR:-./models}:/models:ro   # 사전 스테이징한 FP8 가중치 (읽기전용)
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ['0']             # 단일 GPU 공유 (멀티 GPU/P2P 금지)
+            capabilities: [gpu]
+
+services:
+  # ── 추론 엔진 ────────────────────────────────────────────────────────────────
+  vllm-main:                               # Phase A/B: 메인 프록시 (Llama 3.1-8B-Instruct FP8)
+    <<: *vllm-common
+    profiles: ["phase-a", "phase-b"]
+    container_name: vllm-main
+    environment:
+      <<: *vllm-env
+      VLLM_FLASH_ATTN_VERSION: "2"         # ★Llama: Blackwell FA3 미지원 → FA2
+    # 가중치는 사전 스테이징된 FP8 체크포인트 가정 → --quantization 플래그 불필요.
+    # (BF16 가중치를 즉석 FP8로 돌리려면 command에 --quantization fp8 추가)
+    # ★OpenCode/IDE 에이전트(FR-9)는 function/tool calling 을 사용한다 → vLLM에 tool 파서 활성 필수.
+    #   미설정 시 '"auto" tool choice requires --enable-auto-tool-choice' 오류로 클라이언트 연동 실패.
+    #   Llama 3.1 계열 파서 = llama3_json. (운영 70B에도 동일 적용)
+    command: >
+      --model /models/llama-3.1-8b-instruct-fp8
+      --served-model-name main-llama
+      --port 8000
+      --gpu-memory-utilization ${MAIN_GPU_UTIL:-0.45}
+      --max-model-len ${MAIN_MAX_LEN:-16384}
+      --enable-auto-tool-choice
+      --tool-call-parser llama3_json
+    ports:
+      - "8000:8000"                        # 디버그용 직접 노출 (운영은 LiteLLM 경유)
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 300s                   # 모델 로드 시간 고려
+
+  vllm-sub:                                # Phase B: 서브 (Gemma 2-9B-it FP8)
+    <<: *vllm-common
+    profiles: ["phase-b"]
+    container_name: vllm-sub
+    environment:
+      <<: *vllm-env
+      # ★Gemma2: logit soft-capping → FlashInfer 권장(기본). SM120에서 FlashInfer head_size 이슈 시
+      #   .env GEMMA_ATTN_BACKEND 를 FLASH_ATTN 으로 바꿔 softcap 지원 FA 빌드로 재시도(TEST_PLAN B-1).
+      VLLM_ATTENTION_BACKEND: ${GEMMA_ATTN_BACKEND:-FLASHINFER}
+    command: >
+      --model /models/gemma-2-9b-it-fp8
+      --served-model-name sub-gemma
+      --port 8000
+      --gpu-memory-utilization ${SUB_GPU_UTIL:-0.40}
+      --max-model-len ${SUB_MAX_LEN:-8192}
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
+
+  vllm-autocomplete:                       # IDE tab 자동완성 전용 FIM 코드 모델 (StarCoder2-7B FP8 ~8GB)
+    <<: *vllm-common                       # ★FIM(Fill-in-the-Middle) 모델 — Llama/Gemma(instruct)는 FIM 미지원이라
+    profiles: ["phase-ide"]                #   tab 자동완성 불가. 운영 2-트랙(70B 채팅 + FIM 7B 자동완성)의 축소 검증.
+    container_name: vllm-autocomplete
+    environment:
+      <<: *vllm-env
+      # StarCoder2 는 일반 attention. Blackwell FA3 미지원 → FA2 (Llama 와 동일 정책).
+      VLLM_FLASH_ATTN_VERSION: "2"
+    # base(FIM) 모델 → tool/chat 플래그 불필요. /v1/completions 의 prompt+suffix 로 FIM 자동완성.
+    command: >
+      --model /models/starcoder2-7b-fp8
+      --served-model-name autocomplete-starcoder2
+      --port 8000
+      --gpu-memory-utilization ${AUTOCOMPLETE_GPU_UTIL:-0.30}
+      --max-model-len ${AUTOCOMPLETE_MAX_LEN:-8192}
+    ports:
+      - "8003:8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
+
+  vllm-autocomplete-qwen:                  # IDE 자동완성 대안 FIM 모델 (Qwen2.5-Coder-7B FP8 ~8GB)
+    <<: *vllm-common                       # ★중국계(Alibaba) — 자동완성 품질 StarCoder2 대비 우위(PoC). 보안팀 승인 시 채택.
+    profiles: ["phase-ide-qwen"]           #   코드 컨텍스트 한정·폐쇄망. /v1/completions FIM.
+    container_name: vllm-autocomplete-qwen
+    environment:
+      <<: *vllm-env
+      VLLM_FLASH_ATTN_VERSION: "2"
+    command: >
+      --model /models/qwen2.5-coder-7b-fp8
+      --served-model-name autocomplete-qwen
+      --port 8000
+      --gpu-memory-utilization ${AUTOCOMPLETE_QWEN_GPU_UTIL:-0.40}
+      --max-model-len ${AUTOCOMPLETE_QWEN_MAX_LEN:-8192}
+    ports:
+      - "8004:8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
+
+  vllm-gemma27b:                           # Phase C: 운영 서브 모델 실검증 (Gemma 2-27B FP8 ~27GB)
+    <<: *vllm-common                       # ★VRAM 거의 다 사용 → phase-b 서비스와 동시 실행 금지(단독)
+    profiles: ["phase-c"]
+    container_name: vllm-gemma27b
+    environment:
+      <<: *vllm-env
+      VLLM_ATTENTION_BACKEND: ${GEMMA_ATTN_BACKEND:-FLASHINFER}   # ★Gemma2 (vllm-sub와 동일 정책)
+    command: >
+      --model /models/gemma-2-27b-it-fp8
+      --served-model-name prod-gemma27b
+      --port 8000
+      --gpu-memory-utilization ${GEMMA27B_GPU_UTIL:-0.92}
+      --max-model-len ${GEMMA27B_MAX_LEN:-8192}
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 420s
+
+  # ── 게이트웨이 (LiteLLM, OSS 무료 전용) ──────────────────────────────────────
+  litellm:
+    # ★OSS(무료) 전용. Enterprise 라이선스 키(LITELLM_LICENSE)를 절대 설정하지 않는다.
+    #   → 가상 키/예산/Rate Limit/모델 allowlist/Presidio PII/콜백 로깅만 사용.
+    #   → Audit 보존/SSO/자동 키 로테이션 등 Enterprise 기능 미사용 (자체 콜백·스크립트로 대체).
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm-database:v1.89.0}
+    container_name: litellm
+    restart: unless-stopped
+    networks: [ai-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      presidio-analyzer:
+        condition: service_started
+      presidio-anonymizer:
+        condition: service_started
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro       # 라우팅·가드레일·로깅 정의
+      - ./litellm/audit_logger.py:/app/audit_logger.py:ro  # ★FR-5/FR-7 커스텀 콜백 (config callbacks 참조)
+      - ./litellm/gemma_compat.py:/app/gemma_compat.py:ro  # ★Gemma2 호환 pre-call 변환(system 병합+tools 제거)
+      - ./litellm/autocomplete_compat.py:/app/autocomplete_compat.py:ro  # ★Qwen 자동완성 FIM 토큰 정규화
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?master key 필요}
+      - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:?required}@postgres:5432/litellm
+      - STORE_MODEL_IN_DB=True
+      - PRESIDIO_ANALYZER_API_BASE=http://presidio-analyzer:3000
+      - PRESIDIO_ANONYMIZER_API_BASE=http://presidio-anonymizer:3000
+      # LITELLM_LICENSE 를 의도적으로 비워둔다(OSS 모드 강제).
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:4000/health/liveliness').status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── 키/스펜드/Audit 저장소 ──────────────────────────────────────────────────
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16}
+    container_name: postgres
+    restart: unless-stopped
+    networks: [ai-net]
+    environment:
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?required}
+      - POSTGRES_DB=litellm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 백업 대상 (REQUIREMENTS FR-11): pgdata 볼륨을 정기 덤프/스냅샷 (scripts/backup.sh)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── PII 마스킹 (Presidio, 자체 호스팅 = 폐쇄망 가능한 유일한 OSS PII 경로) ────
+  presidio-analyzer:
+    image: ${PRESIDIO_ANALYZER_IMAGE:-mcr.microsoft.com/presidio-analyzer:2.2.355}
+    container_name: presidio-analyzer
+    restart: unless-stopped
+    networks: [ai-net]
+    volumes:
+      # ★FR-6 커스텀 recognizer(KR_RRN/DB_SECRET). 반입 절차/검증은 presidio/README.md 참조.
+      - ./presidio/recognizers:/opt/presidio/recognizers:ro
+    environment:
+      # 이미지 버전이 이 변수를 인식하는지 Phase A-4에서 확인. 미지원 시 커스텀 이미지(presidio/README.md §2).
+      - RECOGNIZER_REGISTRY_CONF_FILE=/opt/presidio/recognizers/kr_custom.yaml
+    ports:
+      - "5002:3000"        # host:container (디버그용)
+
+  presidio-anonymizer:
+    image: ${PRESIDIO_ANONYMIZER_IMAGE:-mcr.microsoft.com/presidio-anonymizer:2.2.355}
+    container_name: presidio-anonymizer
+    restart: unless-stopped
+    networks: [ai-net]
+    ports:
+      - "5001:3000"
+
+networks:
+  ai-net:
+    driver: bridge
+
+volumes:
+  pgdata:

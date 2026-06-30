@@ -1,0 +1,156 @@
+# litellm/config.yaml
+# LiteLLM 게이트웨이 설정 (OSS 무료 전용 / 폐쇄망)
+# 마운트 경로: docker-compose.yml → litellm: volumes → /app/config.yaml
+#
+# ⚠ Enterprise 기능 미사용: LITELLM_LICENSE 미설정. 여기서는 OSS 기능만 사용한다.
+# 매핑: FR-2 게이트웨이 / FR-3 키 / FR-4 Rate Limit / FR-5 Audit / FR-6 PII / FR-8 라우팅·폴백
+#
+# 3-Tier 키 정책(FR-3)·Rate Limit(FR-4)은 이 파일이 아니라 **가상 키 발급 시**(/key/generate)에
+# rpm_limit/tpm_limit/models 로 적용한다(TEST_PLAN A-2 / scripts/rotate_keys.sh 참조).
+# 이 파일은 모델·라우팅·가드레일·로깅을 정의한다.
+#
+# ★구조 주의(LiteLLM): `model_list`·`router_settings`·`guardrails`·`litellm_settings`·`general_settings`는
+#   모두 **YAML 최상위 키**다. guardrails 를 litellm_settings 아래에 넣으면 로드되지 않는다(가드레일 미적용).
+
+# ──────────────────────────────────────────────────────────────────────────
+# 1) 모델 등록 (vLLM OpenAI 호환 백엔드를 docker 네트워크 서비스명으로 연결)
+#    served-model-name(=compose의 --served-model-name)을 openai/<name>으로 지정
+# ──────────────────────────────────────────────────────────────────────────
+model_list:
+  # 메인 (Phase A/B) — Llama 3.1-8B-Instruct FP8
+  - model_name: main-llama
+    litellm_params:
+      model: openai/main-llama
+      api_base: http://vllm-main:8000/v1
+      api_key: "dummy"            # vLLM은 키 불필요(형식상 값)
+    model_info:
+      mode: chat
+
+  # 서브 (Phase B) — Gemma 2-9B-it FP8
+  - model_name: sub-gemma
+    litellm_params:
+      model: openai/sub-gemma
+      api_base: http://vllm-sub:8000/v1
+      api_key: "dummy"
+    model_info:
+      mode: chat
+      # ★Gemma 2 는 ① chat template 이 tools/function 미지원 + ② system role 거부
+      #   (raise_exception 'System role not supported'). 따라서 tool calling/system prompt 를 쓰는
+      #   에이전트(OpenCode 등)에는 구조적으로 부적합 → 자동완성·단순 채팅 용도 전용(FR-8 라우팅 설계).
+      #   supports_function_calling:false 는 capability 메타데이터 표시용(이 버전 LiteLLM 의 drop_params 는
+      #   tools 를 자동 제거하지 못함). 에이전트 클라이언트는 main-llama 로 라우팅한다(opencode.json 참조).
+      supports_function_calling: false
+
+  # IDE 자동완성(FIM) — StarCoder2-7B FP8 (phase-ide). /v1/completions 의 prompt+suffix 로 FIM.
+  - model_name: autocomplete-starcoder2
+    litellm_params:
+      model: openai/autocomplete-starcoder2
+      api_base: http://vllm-autocomplete:8000/v1
+      api_key: "dummy"
+    model_info:
+      mode: completion          # ★chat 아님: FIM 자동완성은 completion 엔드포인트
+      supports_function_calling: false
+
+  # IDE 자동완성 대안(FIM) — Qwen2.5-Coder-7B FP8 (phase-ide-qwen). ★중국계, 자동완성 전용 검토.
+  - model_name: autocomplete-qwen
+    litellm_params:
+      model: openai/autocomplete-qwen
+      api_base: http://vllm-autocomplete-qwen:8000/v1
+      api_key: "dummy"
+    model_info:
+      mode: completion
+      supports_function_calling: false
+
+  # 운영 서브 실검증 (Phase C) — Gemma 2-27B FP8 (단독 기동)
+  - model_name: prod-gemma27b
+    litellm_params:
+      model: openai/prod-gemma27b
+      api_base: http://vllm-gemma27b:8000/v1
+      api_key: "dummy"
+    model_info:
+      mode: chat
+      supports_function_calling: false   # ★Gemma2 동일(위 sub-gemma 참조)
+
+# ──────────────────────────────────────────────────────────────────────────
+# 2) 라우팅 / 폴백 (FR-8)  — ★최상위 router_settings
+#    ※ "토큰 길이·작업 유형 → 모델 자동 선택"은 LiteLLM 기본 기능이 아니다.
+#      [권장] 클라이언트(OpenCode/IDE)가 용도별로 모델명을 직접 지정
+#             - 자동완성/짧은 Q&A → "sub-gemma"
+#             - JIRA/로그/문서/복잡추론 → "main-llama"
+#      [선택·고급] 커스텀 pre-call 훅으로 토큰 수 기반 모델 재지정.
+#    fallbacks/context_window_fallbacks 는 router_settings 에 둔다(litellm_settings보다 우선).
+# ──────────────────────────────────────────────────────────────────────────
+router_settings:
+  routing_strategy: simple-shuffle
+  enable_pre_call_checks: true     # 컨텍스트 한도 기반 사전 점검 활성
+
+  # 장애 폴백: main 실패 시 sub로 (FR-8 ②). main 헬스체크 실패 시 sub로 자동 전환.
+  fallbacks:
+    - main-llama: ["sub-gemma"]
+  # 컨텍스트 초과 시 더 긴 컨텍스트 모델로
+  context_window_fallbacks:
+    - sub-gemma: ["main-llama"]
+
+# ──────────────────────────────────────────────────────────────────────────
+# 3) PII 마스킹 (FR-6) — ★최상위 guardrails / Presidio (자체 호스팅, OSS)
+#    입력 마스킹(pre_call) + 응답 마스킹(output_parse_pii) → 모델 입력·로그·Audit 모두 마스킹됨
+# ──────────────────────────────────────────────────────────────────────────
+guardrails:
+  - guardrail_name: "presidio-pii"
+    litellm_params:
+      guardrail: presidio
+      mode: "pre_call"
+      default_on: true              # ★모든 요청에 자동 적용(미설정 시 요청별 guardrails 명시 필요 → 마스킹 누락)
+      output_parse_pii: true
+      # 표준 엔티티: 마스킹 정책
+      pii_entities_config:
+        CREDIT_CARD: "MASK"
+        EMAIL_ADDRESS: "MASK"
+        PHONE_NUMBER: "MASK"
+        # ★PERSON(사람 이름)은 제외: Presidio PERSON 인식기가 영어(spaCy en) 기반이라 한국어 문장/응답의
+        #   평범한 단어를 이름으로 오탐(false positive) → output_parse_pii 와 결합 시 모델 응답이 <PERSON>
+        #   으로 깨진다. 코드 에이전트 용도에 부적합하므로 비활성. (한국어 PERSON 마스킹이 꼭 필요하면
+        #   ko spaCy 모델 + 한국어 language 분석으로 별도 검증 후 도입.)
+        # ── 커스텀 엔티티 (presidio-analyzer 측 custom recognizer 로 인식) ──
+        #    인식 정의: presidio/recognizers/kr_custom.yaml (analyzer 컨테이너에 반입 필수)
+        KR_RRN: "MASK"      # 주민등록번호 → 마스킹
+        DB_SECRET: "BLOCK"  # DB 비밀번호/시크릿 → 차단(위반 시 422 + 사유, FR-6 AC)
+
+# ──────────────────────────────────────────────────────────────────────────
+# 4) 일반 설정 / 로깅 콜백
+# ──────────────────────────────────────────────────────────────────────────
+litellm_settings:
+  drop_params: true                # vLLM 미지원 파라미터 자동 제거
+  set_verbose: false
+  telemetry: false                 # ★폐쇄망: 외부 텔레메트리(phone-home) 차단
+  num_retries: 2
+  request_timeout: 120
+
+  # ── Audit 콜백 (FR-5 해시 + FR-7 이상탐지) ──────────────────────────────
+  # 기본 5필드(WHO/WHEN/MODEL/PROMPT/OUTPUT)는 general_settings.store_prompts_in_spend_logs로
+  # LiteLLM_SpendLogs 에 적재된다. PROMPT 해시(위변조 검증)·이상탐지는 커스텀 콜백으로 보강:
+  #   - ./litellm/audit_logger.py 가 compose에서 /app/audit_logger.py 로 마운트됨
+  #   - audit_log / anomaly_alerts 테이블에 비동기(async)로 적재 → 동기 응답 경로 비차단
+  callbacks: ["audit_logger.audit_handler", "gemma_compat.gemma_compat_handler", "autocomplete_compat.autocomplete_compat_handler"]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY     # 서버 측 전용. 클라이언트엔 가상 키만.
+  database_url: os.environ/DATABASE_URL
+
+  # Audit Trail(FR-5): 요청/응답 본문을 SpendLogs에 저장 → PROMPT/OUTPUT 필드 확보
+  # (WHO=api_key/user, WHEN=startTime/endTime, MODEL=model+tokens는 기본 적재)
+  store_prompts_in_spend_logs: true
+  # 보존 기간(OSS 기능). 폐쇄망 감사 정책에 맞게 조정.
+  maximum_spend_logs_retention_period: "90d"
+  maximum_spend_logs_retention_interval: "1d"
+
+# ──────────────────────────────────────────────────────────────────────────
+# 빌드/검증 메모
+# - ★store_prompts_in_spend_logs는 일부 구버전(예: v1.77.2)에서 본문이 빈 값({})으로
+#   저장되는 버그 이력이 있다. 고정한 LiteLLM 버전에서 PROMPT/OUTPUT가 실제 적재되는지
+#   Phase A-3에서 반드시 확인할 것. 빈 값이면 audit_logger.py가 콜백 인자(kwargs)에서 직접
+#   프롬프트/응답을 받아 audit_log 테이블에 보강 적재하므로 5필드 자체는 충족된다.
+# - KR_RRN/DB_SECRET 는 Presidio 표준 엔티티가 아니다 → presidio-analyzer 에 custom recognizer
+#   (presidio/recognizers/kr_custom.yaml)를 반드시 로드해야 인식된다. 미반영 시 두 엔티티는 무시됨.
+# - Phase A에서는 main-llama만 백엔드가 떠 있다(sub/prod 백엔드는 해당 프로파일에서 기동).
+#   sub-gemma/prod-gemma27b 호출은 그 프로파일에서만 정상.

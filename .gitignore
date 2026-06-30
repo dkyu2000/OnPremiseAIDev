@@ -1,0 +1,32 @@
+# 시크릿 (NFR-5: 평문 커밋 금지) — .env.example 만 커밋
+.env
+*.env
+!.env.example
+
+# 사전 스테이징 모델 가중치 (오프라인 반입, 리포에 넣지 않음)
+models/*
+!models/.gitkeep
+
+# 백업 산출물 (scripts/backup.sh)
+backups/
+*.dump
+*.sql.gz
+*.tar.gz
+
+# 파이썬 캐시 (audit_logger 등)
+__pycache__/
+*.pyc
+
+# 기타
+*.log
+.DS_Store
+
+# HF 다운로드용 가상환경 (재생성 가능, 커밋 불필요)
+.hfvenv/
+# 테스트 산출물
+ide_test/
+*.py.bak
+
+# 사내 제안서 원본 / 테스트 흔적 (공개 리포 제외)
+docs/*.pptx
+newfile.txt
