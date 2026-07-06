@@ -58,10 +58,18 @@ if [ "$WITH_IMAGES" = 1 ]; then
   log "② docker 이미지 목록 수집 (프로파일 포함)"
   mapfile -t IMAGES < <(DC config 2>/dev/null | awk '/image:/{print $2}' | sort -u)
   printf '   - %s\n' "${IMAGES[@]}"
-  log "   docker save → images/onprem-images.tar (용량 큼)"
-  DK save "${IMAGES[@]}" -o "$OUT/images/onprem-images.tar"
+  TAR="$OUT/images/onprem-images.tar"
+  # resume: 이미 유효한 tar(끝에 manifest 포함)가 있으면 재-save 생략 → 대용량 재작업 방지
+  if [ -f "$TAR" ] && ${SUDO:-} tar -tf "$TAR" >/dev/null 2>&1; then
+    log "   기존 유효 tar 재사용(재-save 생략): $TAR"
+  else
+    log "   docker save → images/onprem-images.tar (용량 큼)"
+    DK save "${IMAGES[@]}" -o "$TAR"
+  fi
+  # ★sudo docker save 산출물은 root:600 → 사용자 소유로 바꿔야 이후 sha256sum/전송이 가능
+  ${SUDO:-} chown "$(id -u):$(id -g)" "$TAR"
   printf '%s\n' "${IMAGES[@]}" > "$OUT/images/IMAGES.list"
-  sha "$OUT/images/onprem-images.tar" "images/onprem-images.tar"
+  sha "$TAR" "images/onprem-images.tar"
 else
   log "② 이미지 스킵(--no-images) — 실장비에서 별도 docker load/build 필요"
 fi
