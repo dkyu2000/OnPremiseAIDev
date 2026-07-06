@@ -227,6 +227,7 @@ sudo bash scripts/backup.sh
 | 에이전트가 코드 실행 실패 `Python executable not found` | 호스트에 `python` 명령 부재(`python3`만) | `sudo apt install python-is-python3` (에이전트의 bash 코드 실행에 필요) |
 | 에이전트 요청 `400 ... context length is only N tokens` | OpenCode 등 에이전트는 system+도구정의+대화 누적으로 입력↑ → max-model-len 초과 | `.env` `MAIN_MAX_LEN` 확대(예 32768~). Llama 3.1 은 128K 지원, 운영 70B 도 동일. KV 증가분 VRAM 고려 |
 | 자동완성 모델 바꿨더니 빈 제안(0 tok) | Continue 가 모델별 FIM 토큰 추론 실패 — 커스텀 모델명을 Qwen 으로 인식 못해 StarCoder2 토큰(`<fim_prefix>`)을 Qwen(`<\|fim_prefix\|>`)에 전송 | `litellm/autocomplete_compat.py` 콜백이 게이트웨이에서 FIM 토큰 정규화(반영됨). 타 코드모델(DeepSeek-Coder 등)도 동일 패턴 |
+| 에이전트에서 `Rate limit exceeded`(적게 쓴 듯한데 발생) | OpenCode 등 에이전트는 **1 프롬프트당 tool 왕복으로 모델 수십~수백 회 호출** → 일반 채팅 기준 RPM(60) 금방 초과 + 재시도 악순환 | 에이전트 사용 키는 **RPM/TPM 대폭 상향**(예 600 RPM/2M TPM). `rotate_keys.sh` 의 에이전트 사용자 등급을 상향하거나 전용 등급 신설 |
 
 ---
 

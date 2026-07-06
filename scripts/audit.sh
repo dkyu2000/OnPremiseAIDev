@@ -16,8 +16,10 @@
 #   ./audit.sh stats                 모델별/사용자별 집계
 #   ./audit.sh sql "<SELECT ...>"    임의 SELECT (읽기전용 권장)
 #   ./audit.sh psql                  대화형 psql 셸 진입
+#   ./audit.sh follow [간격초]       실시간 tail — 새 요청이 완료되는 즉시 프롬프트/출력 스트리밍(Ctrl-C 종료)
 #
 # 환경변수: PG_SERVICE(기본 postgres) / PG_USER(litellm) / PG_DB(litellm)
+#           FOLLOW_MAXLEN(프롬프트/출력 표시 길이, 기본 500) / FOLLOW_INTERVAL(폴링 간격초, 기본 1)
 
 set -euo pipefail
 
@@ -93,6 +95,41 @@ case "$cmd" in
     ;;
   psql)
     ${SUDO:-} "${DC[@]}" exec "$PG_SERVICE" psql -U "$PG_USER" -d "$PG_DB"
+    ;;
+  follow|watch|tail)
+    # 실시간 tail: 완료(pending 아님)된 새 audit_log 레코드를 폴링해 프롬프트/출력을 스트리밍.
+    #   - 요청이 "들어온" 순간(pending)은 프롬프트가 아직 마스킹 전이라 비워둔다(audit_logger 설계).
+    #     따라서 요청이 '완료'되는 시점에 프롬프트+출력이 함께 표시된다.
+    INTERVAL="${1:-${FOLLOW_INTERVAL:-1}}"
+    MAXLEN="${FOLLOW_MAXLEN:-500}"
+    US=$'\x1f'  # 필드 구분자(Unit Separator) — 프롬프트 본문과 충돌 방지
+    # 시작 기준: 현재까지의 최대 id (과거 로그는 흘리지 않고, 이 순간 이후 신규만 표시)
+    last="$(q -tArc "SELECT COALESCE(MAX(id),0) FROM audit_log;" 2>/dev/null | tr -d '[:space:]')"
+    last="${last:-0}"
+    echo "── audit_log 실시간 tail (기준 id>$last, 폴링 ${INTERVAL}s) ─ Ctrl-C 종료 ──" >&2
+    trap 'echo; echo "── tail 종료 ──" >&2; exit 0' INT
+    while :; do
+      rows="$(q -tArc "
+        SELECT id, to_char(ts,'MM-DD HH24:MI:SS'), coalesce(user_id,'-'), coalesce(model,'-'),
+               coalesce(total_tokens,0), coalesce(prompt_tokens,0), coalesce(output_tokens,0),
+               coalesce(latency_ms,0), coalesce(finish_reason,'-'),
+               replace(left(coalesce(prompt,''), $MAXLEN), chr(10), ' ⏎ '),
+               replace(left(coalesce(output,''), $MAXLEN), chr(10), ' ⏎ ')
+        FROM audit_log
+        WHERE id > $last AND finish_reason IS DISTINCT FROM 'pending'
+        ORDER BY id ASC;" 2>/dev/null || true)"
+      if [ -n "$rows" ]; then
+        while IFS="$US" read -r id ts user model tot pt ot lat fin prompt output; do
+          [ -z "${id:-}" ] && continue
+          printf '\n\033[1;36m━━ #%s\033[0m  %s KST  \033[1;33m[%s]\033[0m  user=%s  tok=%s(p%s/o%s)  %sms  \033[35m%s\033[0m\n' \
+            "$id" "$ts" "$model" "$user" "$tot" "$pt" "$ot" "$lat" "$fin"
+          printf '  \033[32mPROMPT ▸\033[0m %s\n' "$prompt"
+          printf '  \033[34mOUTPUT ◂\033[0m %s\n' "$output"
+          last="$id"
+        done <<< "$rows"
+      fi
+      sleep "$INTERVAL"
+    done
     ;;
   *)
     grep -E '^#   \./audit\.sh' "$0" | sed 's/^# //'

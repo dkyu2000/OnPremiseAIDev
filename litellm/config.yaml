@@ -102,6 +102,12 @@ guardrails:
       mode: "pre_call"
       default_on: true              # ★모든 요청에 자동 적용(미설정 시 요청별 guardrails 명시 필요 → 마스킹 누락)
       output_parse_pii: true
+      # ★코딩 에이전트(OpenCode) 대응: system role 메시지는 스캔 제외.
+      #   OpenCode 등 에이전트의 시스템 프롬프트엔 "secret:"/"password=" 류 지시문·예시가 상존하여
+      #   DB_SECRET recognizer(kr_custom.yaml)에 오탐→BLOCK되어 모든 요청이 차단됨(FR-6 오탐).
+      #   시스템 프롬프트는 클라이언트가 주입하는 신뢰 컨텍스트이므로 PII 스캔 대상에서 제외한다.
+      #   사용자/모델 응답(user·assistant)의 실제 PII·DB_SECRET 탐지는 그대로 유지.
+      skip_system_message_in_guardrail: true
       # 표준 엔티티: 마스킹 정책
       pii_entities_config:
         CREDIT_CARD: "MASK"
