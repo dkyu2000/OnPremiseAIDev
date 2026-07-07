@@ -84,12 +84,15 @@ router_settings:
   routing_strategy: simple-shuffle
   enable_pre_call_checks: true     # 컨텍스트 한도 기반 사전 점검 활성
 
-  # 장애 폴백: main 실패 시 sub로 (FR-8 ②). main 헬스체크 실패 시 sub로 자동 전환.
-  fallbacks:
-    - main-llama: ["sub-gemma"]
-  # 컨텍스트 초과 시 더 긴 컨텍스트 모델로
-  context_window_fallbacks:
-    - sub-gemma: ["main-llama"]
+  # ★[2026-07-07 실측] 운영(phase-prod, 선택지 A)은 vllm-sub 컨테이너를 기동하지 않는다(2-트랙: main+FIM만).
+  #   fallback 대상이 실제로 떠 있지 않은 채로 두면, main-llama 요청이 어떤 이유로든 실패할 때마다
+  #   (예: 컨텍스트 초과) "fallback 시도 → sub-gemma 연결 실패(InternalServerError)"까지 겹쳐 원인이
+  #   가려지는 이중 오류가 발생한다(OpenCode에서 재현: context_window_exceeded 뒤에 connection error 중첩).
+  #   → phase-a/b(sub-gemma 기동)로 되돌릴 때만 아래 두 블록 주석 해제.
+  # fallbacks:
+  #   - main-llama: ["sub-gemma"]
+  # context_window_fallbacks:
+  #   - sub-gemma: ["main-llama"]
 
 # ──────────────────────────────────────────────────────────────────────────
 # 3) PII 마스킹 (FR-6) — ★최상위 guardrails / Presidio (자체 호스팅, OSS)
