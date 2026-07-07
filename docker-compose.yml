@@ -42,9 +42,9 @@ x-vllm-common: &vllm-common
 
 services:
   # ── 추론 엔진 ────────────────────────────────────────────────────────────────
-  vllm-main:                               # Phase A/B: 메인 프록시 (Llama 3.1-8B-Instruct FP8)
+  vllm-main:                               # Phase A/B: 검증용 메인(8B) / phase-prod: 운영 메인(70B, MAIN_MODEL_PATH로 교체)
     <<: *vllm-common
-    profiles: ["phase-a", "phase-b"]
+    profiles: ["phase-a", "phase-b", "phase-prod"]
     container_name: vllm-main
     environment:
       <<: *vllm-env
@@ -53,9 +53,10 @@ services:
     # (BF16 가중치를 즉석 FP8로 돌리려면 command에 --quantization fp8 추가)
     # ★OpenCode/IDE 에이전트(FR-9)는 function/tool calling 을 사용한다 → vLLM에 tool 파서 활성 필수.
     #   미설정 시 '"auto" tool choice requires --enable-auto-tool-choice' 오류로 클라이언트 연동 실패.
-    #   Llama 3.1 계열 파서 = llama3_json. (운영 70B에도 동일 적용)
+    #   Llama 3.1 계열 파서 = llama3_json. (운영 70B에도 동일 파서, served-model-name도 main-llama로 고정 유지
+    #   → litellm/config.yaml·opencode.json 변경 불필요)
     command: >
-      --model /models/llama-3.1-8b-instruct-fp8
+      --model ${MAIN_MODEL_PATH:-/models/llama-3.1-8b-instruct-fp8}
       --served-model-name main-llama
       --port 8000
       --gpu-memory-utilization ${MAIN_GPU_UTIL:-0.45}
@@ -68,8 +69,8 @@ services:
       test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
       interval: 30s
       timeout: 5s
-      retries: 20
-      start_period: 300s                   # 모델 로드 시간 고려
+      retries: 30
+      start_period: 600s                   # ★70B(~70GB) 가중치 로드 시간 고려(8B/9B 대비 여유있게)
 
   vllm-sub:                                # Phase B: 서브 (Gemma 2-9B-it FP8)
     <<: *vllm-common
@@ -97,7 +98,7 @@ services:
 
   vllm-autocomplete:                       # IDE tab 자동완성 전용 FIM 코드 모델 (StarCoder2-7B FP8 ~8GB)
     <<: *vllm-common                       # ★FIM(Fill-in-the-Middle) 모델 — Llama/Gemma(instruct)는 FIM 미지원이라
-    profiles: ["phase-ide"]                #   tab 자동완성 불가. 운영 2-트랙(70B 채팅 + FIM 7B 자동완성)의 축소 검증.
+    profiles: ["phase-ide", "phase-prod"]  #   tab 자동완성 불가. phase-prod: 운영 2-트랙(70B 채팅 + FIM 7B 자동완성).
     container_name: vllm-autocomplete
     environment:
       <<: *vllm-env
