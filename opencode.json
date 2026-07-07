@@ -13,10 +13,6 @@
         "main-llama": {
           "name": "Main — Llama 3.3-70B (FP8)",
           "limit": { "context": 27648, "output": 4096 }
-        },
-        "sub-gemma": {
-          "name": "Sub — Gemma 2-9B (FP8) [채팅 전용·도구 미지원, 현재 미기동]",
-          "limit": { "context": 8192, "output": 2048 }
         }
       }
     }
