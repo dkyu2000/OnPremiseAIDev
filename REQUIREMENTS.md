@@ -31,7 +31,8 @@
 
 ### FR-1. 추론 서빙 (vLLM)
 - vLLM v0.17.0+로 OpenAI 호환 API(`/v1/...`) 제공. `VLLM_FLASH_ATTN_VERSION=2`.
-- 모델 구성은 `CLAUDE.md §5`를 따른다. **운영 채택: Llama 3.3-70B FP8(main) + StarCoder2-7B FP8(autocomplete) 2-트랙만.**
+- 모델 구성은 `CLAUDE.md §5`를 따른다. **운영 채택(2026-07-08 갱신): Llama 3.3-70B NVFP4(main) + StarCoder2-15B FP8(autocomplete) 2-트랙만.**
+  구 채택(FP8 70B+FIM 7B, 2026-07-07)은 VRAM 여유가 30MiB로 타이트했고 NVFP4 전환으로 대체됨(품질도 FIM 15B가 개선).
   Gemma 서브 트랙(2-27B 단일 / Llama 8B+Gemma 9B 듀얼)은 Phase B/C에서 검증 통과했으나 운영 미채택(역사적 기록).
 - **AC:** `curl /v1/chat/completions`가 정상 응답하며, 출력에 garbage character가 없다. `/health` 200.
 
@@ -109,10 +110,11 @@
 > `/v1/chat/completions` 로 경로 자체가 다르다.
 
 > ★**[2026-07-07 운영 결정] 서브 채팅 모델(Gemma 트랙) 미채택.** Phase B(2-트랙 라우팅)·Phase C(27B 서브 실검증) 모두
-> 기술적으로는 검증 통과했으나, 운영 96GB 카드에서 main(70B)+autocomplete만으로 이미 VRAM 여유가 ~1.4GB로
-> 타이트하고, 단일 채팅 모델로 라우팅을 단순화하는 편이 운영 복잡도·장애 지점 관리에 유리하다고 판단해 서브 트랙은
-> 채택하지 않는다. main 실패 시 sub로 넘길 대상 자체가 없으므로 **fallback 라우팅도 사용하지 않는다**(연결 안 된
-> 백엔드로 fallback 시도 시 원인이 가려지는 이중 오류가 발생함이 실측 확인됨 → `litellm/config.yaml` fallback 제거).
+> 기술적으로는 검증 통과했으나, 단일 채팅 모델로 라우팅을 단순화하는 편이 운영 복잡도·장애 지점 관리에 유리하다고
+> 판단해 서브 트랙은 채택하지 않는다(2026-07-07 시점 구성은 VRAM 여유도 ~1.4GB로 타이트했으나, 2026-07-08 main
+> NVFP4 전환 후에는 여유 ~4.5GB로 개선됨 — 단, 서브 미채택 결정 자체는 VRAM 문제와 무관하게 유지). main 실패
+> 시 sub로 넘길 대상 자체가 없으므로 **fallback 라우팅도 사용하지 않는다**(연결 안 된 백엔드로 fallback 시도
+> 시 원인이 가려지는 이중 오류가 발생함이 실측 확인됨 → `litellm/config.yaml` fallback 제거).
 
 - 예외: ① `model=` 명시 시 권한 범위 내 직접 사용, ② Rate Limit 초과 429, ③ 보안 위반 400(PII BLOCK, 실측), 권한 위반 403.
 - **AC:** 매트릭스 대표 케이스가 의도한 모델로 라우팅됨(채팅/에이전트→main, tab 자동완성→autocomplete).
@@ -158,11 +160,14 @@
   **PoC 품질 비교(`docs/POC_FP4_QUANT_COMPARISON.md`, 2026-06-30):** 8B-FP8 / 8B-NVFP4 / 24B-NVFP4 3-way 측정 결과 —
   까다로운 추론에선 **모델 크기 ≫ 양자화**(24B-NVFP4 가 8B-FP8 압도) → 70B-NVFP4 전략 지지. 단 **FP4 반복붕괴(degeneration)
   리스크는 작은 모델 한정**(8B-NVFP4 긴 한국어 추론에서 붕괴, 24B-NVFP4 안정) → **대형=NVFP4 / 소형(자동완성·서브)=FP8** 권장.
-  ★[2026-07-07 운영 결정] 이 3-트랙(70B-NVFP4+27B-FP8 서브+FIM) 구성은 **서브 채팅 모델 미채택 결정에 따라 운영에
-  적용하지 않는다.** 대신 아래 2-트랙 FP8 구성을 채택한다(실측 안정성 우선).
+  ★[2026-07-07 운영 결정] 27B-FP8 **서브**를 포함한 3-트랙 구성은 서브 채팅 모델 미채택 결정에 따라 운영에
+  적용하지 않는다. ★[2026-07-08 운영 결정 갱신] 다만 **main의 NVFP4 자체는 채택**한다 — main만 NVFP4(가중치
+  ~40GB)로 바꾸면 서브 없이도 VRAM이 크게 절감되어(구 FP8 2-트랙 대비 여유 30MiB→~4.5GB) **FIM 모델을
+  StarCoder2-7B→15B로 상향**할 수 있고, 실측상 15B가 7B보다 FIM 완성 품질이 개선됨을 확인(garbage 텍스트
+  발생 빈도 감소, 자연스러운 stop 비율 개선). 이 2-트랙(NVFP4 main + FIM 15B)이 현재 최종 채택 구성이다.
 - **[확정] IDE tab 자동완성 = FIM 전용 코드 모델 추가:** Llama 3.3-70B/Gemma 2(instruct)는 FIM 미지원이라 제대로 된
-  tab 자동완성 불가(실측 확인). → **자동완성 전용 FIM 코드 모델**(StarCoder2-7B/CodeLlama-7B 등, 비중국계)을
+  tab 자동완성 불가(실측 확인). → **자동완성 전용 FIM 코드 모델**(StarCoder2/CodeLlama 등, 비중국계)을
   별도 배포해야 한다. 검증장비(5090)에서 StarCoder2-7B FP8 FIM inline 자동완성 SM120 동작 확인.
-  **운영 최적 구성(96GB 단일 카드, 품질 우선): Llama 3.3-70B FP8(채팅·에이전트) + StarCoder2-7B FP8(자동완성) 2-트랙**
-  (합 ~77GB, KV 여유 ~19GB). 3-트랙(+Gemma27B)은 FP8로 96GB 초과 → FP4 디리스킹(Phase C) 성공 전제에서만 가능.
+  **운영 최종 채택 구성(96GB 단일 카드, 2026-07-08 갱신): Llama 3.3-70B NVFP4(채팅·에이전트) + StarCoder2-15B FP8(자동완성) 2-트랙**
+  (가중치 합 ~55GB, GPU 총사용 ~90.5GB/여유 ~4.5GB — 상세 실측치는 완료보고서 §13).
   제안서의 "자동완성 → Gemma" 표기를 "자동완성 → FIM 코드 모델"로 수정한다.

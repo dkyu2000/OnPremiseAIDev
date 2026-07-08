@@ -44,7 +44,7 @@ x-vllm-common: &vllm-common
 
 services:
   # ── 추론 엔진 ────────────────────────────────────────────────────────────────
-  vllm-main:                               # Phase A/B: 검증용 메인(8B) / phase-prod: 운영 메인(70B, MAIN_MODEL_PATH로 교체)
+  vllm-main:                               # Phase A/B: 검증용 메인(8B) / phase-prod: 운영 메인(70B-NVFP4, MAIN_MODEL_PATH로 교체)
     <<: *vllm-common
     profiles: ["phase-a", "phase-b", "phase-prod"]
     container_name: vllm-main
@@ -98,9 +98,9 @@ services:
       retries: 20
       start_period: 300s
 
-  vllm-autocomplete:                       # IDE tab 자동완성 전용 FIM 코드 모델 (StarCoder2-7B FP8 ~8GB)
+  vllm-autocomplete:                       # IDE tab 자동완성 전용 FIM 코드 모델 (StarCoder2, AUTOCOMPLETE_MODEL_PATH로 크기 결정)
     <<: *vllm-common                       # ★FIM(Fill-in-the-Middle) 모델 — Llama/Gemma(instruct)는 FIM 미지원이라
-    profiles: ["phase-ide", "phase-prod"]  #   tab 자동완성 불가. phase-prod: 운영 2-트랙(70B 채팅 + FIM 7B 자동완성).
+    profiles: ["phase-ide", "phase-prod"]  #   tab 자동완성 불가. phase-prod 운영 채택(2026-07-08): 70B-NVFP4 채팅 + FIM 15B 자동완성(선택지 D).
     container_name: vllm-autocomplete
     environment:
       <<: *vllm-env
@@ -108,7 +108,7 @@ services:
       VLLM_FLASH_ATTN_VERSION: "2"
     # base(FIM) 모델 → tool/chat 플래그 불필요. /v1/completions 의 prompt+suffix 로 FIM 자동완성.
     command: >
-      --model /models/starcoder2-7b-fp8
+      --model ${AUTOCOMPLETE_MODEL_PATH:-/models/starcoder2-7b-fp8}
       --served-model-name autocomplete-starcoder2
       --port 8000
       --gpu-memory-utilization ${AUTOCOMPLETE_GPU_UTIL:-0.30}

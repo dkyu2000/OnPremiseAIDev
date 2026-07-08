@@ -58,19 +58,24 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
 
 ## 5. 모델 구성 (테스트 장비 전용)
 
-**★[2026-07-07 운영 결정 확정] 운영 채택 구성 = 2-트랙 고정: `Llama 3.3-70B FP8`(채팅·에이전트) + `StarCoder2-7B FP8`(FIM 자동완성).**
-서브 채팅 모델(Gemma 트랙)은 **앞으로 모든 환경(검증·운영)에서 사용하지 않는다.** 이유: ①운영 96GB 카드에서
-main(70B)+FIM만으로도 VRAM 여유가 ~1.4GB로 이미 타이트해 서브 모델 추가 여유가 없음, ②단일 채팅 모델로 라우팅을
-단순화(운영 복잡도·장애 지점 감소). 아래 서브/2-트랙-라우팅 항목은 **과거 검증 기록**(Phase B/C, 통과함)이며,
-현재·향후 운영 구성에는 반영하지 않는다.
+**★[2026-07-08 운영 결정 갱신] 운영 채택 구성 = 2-트랙 고정: `Llama 3.3-70B NVFP4`(채팅·에이전트) + `StarCoder2-15B FP8`(FIM 자동완성).**
+서브 채팅 모델(Gemma 트랙)은 **앞으로 모든 환경(검증·운영)에서 사용하지 않는다**(2026-07-07 결정, 유지). 이유:
+①단일 채팅 모델로 라우팅을 단순화(운영 복잡도·장애 지점 감소), ②서브를 얹을 만큼 VRAM 여유가 넉넉하지 않음.
+아래 서브/2-트랙-라우팅 항목 및 구 선택지(70B **FP8**+FIM 7B)는 **과거 검증 기록**이며, 현재 운영 구성에는
+반영하지 않는다.
 
-- **채택(운영 고정):** `Llama 3.3-70B FP8`(main, ~70GB) + `StarCoder2-7B FP8`(FIM 자동완성, ~7GB). 합 ~77GB, KV 여유 ~19GB(96GB 카드 기준).
-  LiteLLM(4000)은 이 두 모델만 라우팅한다(sub/fallback 없음).
+- **채택(운영 고정, 2026-07-08 갱신):** `Llama 3.3-70B NVFP4`(main, 가중치 ~40GB — `NvFp4LinearBackend.FLASHINFER_CUTLASS` 경로 실동작) +
+  `StarCoder2-15B FP8`(FIM 자동완성, 가중치 ~15.4GB). GPU 총사용 ~90.5GB/96GB(여유 ~4.5GB, 96GB 카드 기준).
+  LiteLLM(4000)은 이 두 모델만 라우팅한다(sub/fallback 없음). ★두 vLLM은 반드시 **순차 기동**(main 먼저 실측
+  확인 후 autocomplete)해야 한다 — 동시 기동 시 서로의 메모리 프로파일링이 간섭해 실제보다 훨씬 부족하게
+  계산되어 기동 실패한다(실측 사례: 완료보고서 §13).
+- **[구 채택, 2026-07-07~08, 현재 미사용] 2-트랙(FP8):** `Llama 3.3-70B FP8`(~70GB) + `StarCoder2-7B FP8`(~7GB).
+  합 ~77GB, 여유 ~30MiB로 매우 타이트했음. NVFP4 전환으로 대체(품질도 FIM 15B가 7B보다 개선 확인).
 - **[역사적 검증 기록, 미채택] 운영 서브 모델 실검증:** `Gemma 2-27B (FP8, ~27GB)` 단일 — Phase C에서 실측 통과했으나 운영 미채택.
 - **[역사적 검증 기록, 미채택] 2-트랙 라우팅 패턴 검증:** `Llama 3.1-8B-Instruct (FP8, ~8GB)` [메인 프록시] + `Gemma 2-9B-it (FP8, ~9GB)` [서브]
   — Phase B에서 vLLM 인스턴스 2개(포트 8000/8001) 동시상주·라우팅 분기를 실측 통과했으나 운영 미채택.
-- **IDE tab 자동완성(FIM) 검증:** `StarCoder2-7B (FP8, ~8GB)` [autocomplete] — Llama/Gemma(instruct)는 FIM 미지원이라
-  inline 자동완성 불가 → FIM 전용 코드 모델 별도. phase-ide 프로파일(main+autocomplete)로 검증(포트 8003), phase-prod로 운영 채택.
+- **IDE tab 자동완성(FIM) 검증:** `StarCoder2-7B/15B (FP8)` [autocomplete] — Llama/Gemma(instruct)는 FIM 미지원이라
+  inline 자동완성 불가 → FIM 전용 코드 모델 별도. phase-ide 프로파일(main+autocomplete)로 검증(포트 8003), phase-prod로 운영 채택(현재 15B).
 - 중국계 모델(Qwen/DeepSeek 등)은 **보안 정책상 사용 금지** (제안서 기준) — 자동완성 모델도 비중국계(StarCoder2/CodeLlama)로 한정.
 
 ## 6. 🚫 금지 사항 (Never Do)
