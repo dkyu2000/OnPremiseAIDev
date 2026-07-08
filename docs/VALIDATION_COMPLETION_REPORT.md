@@ -9,6 +9,11 @@
 | 운영 목표 환경 | Dell Precision 7960 + RTX PRO 6000 Blackwell 96GB (동일 SM120) |
 | 판정 | **운영 본 구축 Go** (조건부 항목은 §9 참조) |
 
+> **★[2026-07-08 갱신]** 위 §1~10은 테스트 장비(RTX 5090) 검증 완료 시점(2026-06-30) 기록이다.
+> 이후 **운영 장비(RTX PRO 6000 96GB)로 실제 Go-Live 전환을 수행**했으며, 그 실행 기록은 **§11 이하**에
+> 추가했다. §11에서 서브 채팅 모델(Gemma) 트랙을 운영에서 완전히 폐지하기로 최종 결정했다 — §8의
+> 선택지 B/C, §9.2의 NVFP4/Qwen 전환 검토는 이 결정으로 **미채택**되었다(사유는 §11.8 참조).
+
 ---
 
 ## 1. 검증 배경 및 목적
@@ -230,6 +235,111 @@
 
 ---
 
+## 11. 운영 장비(RTX PRO 6000) Go-Live 실행 기록 (2026-07-07 ~ 07-08)
+
+### 11.1 개요
+검증장비(RTX 5090)에서의 §1~10 검증 완료 후, 실제 운영 장비(Dell Precision 7960 + RTX PRO 6000 Blackwell
+96GB, hostname `LGCNS-AI-DEV-Precision7960`)로 **실제 Go-Live 전환**을 수행했다. 목적은 §11.8에서 서술할
+운영 정책(서브 채팅 모델 미채택) 확정을 포함, "이론상 이전 가능"이 아니라 **실기동으로 증명**하는 것이었다.
+
+### 11.2 환경 확인 및 사전 조치
+- GPU 인식: `NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition`, 97887 MiB, Driver 595.71.05 — **5090과 완전 동일 버전 조합**(재현성 확인, NFR-2).
+- **docker 그룹 권한 이슈**: `wiseop` 계정이 `docker` 그룹에 새로 추가됐으나, 이미 시작된 OS 로그인 세션(`loginctl` 세션이 그룹 추가 이전에 시작)이라 반영 안 됨 → **OS 재로그인/재부팅**으로 해결(앱 재시작만으로는 불충분했음).
+- **nvidia-container-toolkit 미설치 발견**: CLAUDE.md §4가 요구하는 필수 컴포넌트가 이 신규 장비에 없었음(`docker run --gpus all` → "no known GPU vendor found from CDI"). NVIDIA 공식 apt 레포로 설치 + `nvidia-ctk runtime configure` + CDI 스펙 생성(`/etc/cdi/nvidia.yaml`)으로 해결, `docker run --gpus all ... nvidia-smi`로 검증 완료.
+- 버전 재확인(컨테이너 내부): CUDA 12.9 / torch 2.10.0+cu129 / vLLM 0.17.1 / capability (12,0) — 5090 실측치와 **완전 일치**.
+
+### 11.3 이관 상태 확인
+`scripts/migrate_export.sh`/`migrate_import.sh`로 이관된 번들(git repo·docker 이미지·`.env`·검증용 모델·Claude 메모리)이
+이미 반입되어 있었다. Postgres 볼륨이 이 세션에서 **신규 생성**된 것을 확인 → 검증장비의 키/Audit 데이터는
+애초에 이 장비에 존재하지 않음(별도 DB) → 부록A "테스트 키 전량 삭제"는 별도 조치 없이 이미 충족.
+
+### 11.4 운영 전환(Go-Live) 체크리스트 수행 (`OPERATOR_GUIDE.md` 부록A)
+| 항목 | 수행 내용 |
+|---|---|
+| 검증 데이터 초기화 | `TRUNCATE audit_log, anomaly_alerts` 수행(헬스체크로 생긴 더미 레코드 1건 포함 정리) |
+| 운영 키 발급 | admin 가상 키 1개 발급(`admin-ops-admin-20260706`, 90일 만료) — 사용자별 대량 발급은 명단 확보 후 별도 |
+| 시크릿 재생성 | `LITELLM_MASTER_KEY`/`POSTGRES_PASSWORD` 신규 강난수로 교체, `ALTER ROLE`로 실DB 반영, 재기동 후 **기존 가상 키는 마스터 키와 독립이라 그대로 유효함**을 확인 |
+| 모델 교체 | 8B(검증) → **Llama 3.3-70B FP8**(운영, 아래 §11.5) |
+| VRAM 재산정 | §11.6 참조 |
+| 확정 버전 점검 | §11.2에서 5090과 완전 일치 확인 |
+| 백업 | `scripts/backup.sh` 수행(db.sql.gz + config.tar.gz), 재확인 실행 |
+| 최종 헬스체크 + E2E | 전 서비스 200, admin 키로 실제 요청 1건 + audit_log 적재 확인 |
+
+### 11.5 70B 메인 모델 스테이징
+- 소스: `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic`(HuggingFace, ungated 확인) — vLLM 이미지 내장 `huggingface-cli`로 다운로드(68GB, 약 1시간 48분).
+- **LICENSE 누락 발견**: 양자화 리포에 LICENSE 파일이 동봉되지 않음(선행 스테이징한 8B/9B/27B 모델과 차이) → 동일 계열의 미양자화 ungated 리포(`RedHatAI/Llama-3.3-70B-Instruct`)에서 LICENSE/NOTICE/USE_POLICY.md 확보해 동봉.
+- `scripts/stage_model.sh manifest` 로 SHA256SUMS 생성 → `gate`로 무결성·라이선스 검증 통과(FR-10 ②③).
+
+### 11.6 VRAM 파라미터 튜닝 (실측 시행착오 3회)
+운영 96GB 카드에서 이론치(70B~70GB+FIM~7GB=합~77GB, KV 여유~19GB)만으로 파라미터를 잡았으나 실측과 크게 어긋남을 확인:
+
+| 시도 | 설정 | 결과 |
+|---|---|---|
+| 1차 | `MAIN_GPU_UTIL=0.83`, `MAIN_MAX_LEN=32768` | ❌ KV 10.0GiB 필요 / 9.04GiB만 가용 → EngineCore 기동 실패, **32회 재시작 크래시 루프** |
+| 2차 | `MAIN_GPU_UTIL=0.85`(util 상향)로 재시도 | ❌ "Free memory... less than desired util" — autocomplete(nominal 9.5GiB)가 CUDA 컨텍스트/cudagraph 오버헤드로 **실사용 13.6GiB**라 free 공간 자체가 부족(정책상 gpu_memory_utilization은 프로세스 오버헤드를 반영 못함을 실증) |
+| 3차 | `MAIN_GPU_UTIL=0.83` 유지, `MAIN_MAX_LEN=28672` | ❌ KV 8.75GiB 필요 / 8.74GiB 가용 — **0.01GiB 차이로 재실패** |
+| **최종** | `MAIN_GPU_UTIL=0.83`, `MAIN_MAX_LEN=27648`, `AUTOCOMPLETE_GPU_UTIL=0.10` | ✅ **healthy, 재시작 없음.** 실측 GPU 사용량 96,462~97,212 / 97,887 MiB (**여유 30~1,400 MiB, 매우 타이트**) |
+
+**교훈(문서 반영, `.env`/`OPERATOR_GUIDE.md` §10):** `gpu_memory_utilization`은 vLLM 자체 텐서(가중치+KV) 예산일
+뿐, 프로세스별 CUDA 컨텍스트·cudagraph 캡처 오버헤드는 포함하지 않는다. 동시상주 구성에서는 이론치보다
+**실측 마진을 반드시 확보**해야 한다.
+
+### 11.7 클라이언트 연동 검증
+- **OpenCode 1.17.14**: 신규 설치(공식 install 스크립트) → admin 키로 `opencode run` 실행, `read_file` 도구 호출로 `REQUIREMENTS.md`를 읽어 FR-5(Audit Trail)를 정확히 요약 — tool calling 전체 왕복 정상, audit_log 정상 적재.
+- **VS Code 1.127.0(snap) + Continue 2.0.0**: 신규 설치 → `~/.continue/config.yaml` 작성(main-llama: chat/edit/apply, autocomplete-starcoder2: autocomplete). 채팅(REQUIREMENTS.md FR-5 질의, 도구 호출 포함) 정상. tab 자동완성은 Continue 자체 텔레메트리(`~/.continue/dev_data/0.2.0/autocomplete.jsonl`)로 **37건 중 24건(65%) 수락**, 테스트 파일의 모든 함수(add/is_even/factorial/reverse_string/distance_to/fetch_user)가 정확히 채워짐을 확인(에디터 미저장 버퍼로 인해 처음엔 디스크 반영이 안 보였던 것으로, 저장 후 확인됨).
+
+### 11.8 운영 정책 확정: 서브 채팅 모델(Gemma) 트랙 폐지
+**결정: 앞으로 모든 검증·운영 단계에서 서브 채팅 모델을 사용하지 않는다. main(70B FP8)+FIM(StarCoder2) 2-트랙만 채택.**
+
+**사유:**
+1. §11.6 실측 결과, main+FIM 2-트랙만으로 이미 GPU 여유가 30~1,400MiB로 사실상 0에 가까움 — 서브 모델(9B든 27B든)을 얹을 물리적 여유가 없음.
+2. 단일 채팅 모델 구조가 운영 복잡도·장애 지점 관리에 유리함(§11.9의 fallback 이중오류 사례 참조).
+
+**영향받은 파일(전면 갱신, 커밋 `83e3b42`):** `CLAUDE.md`(§5), `REQUIREMENTS.md`(FR-3/FR-8), `TEST_PLAN.md`(Phase B/C에 미채택 콜아웃 추가, 결과 자체는 역사적 기록으로 보존), `docs/OPERATOR_GUIDE.md`(§10 선택지 A 확정 채택 명시, B/C 미채택 처리 — 즉 §8/§9.2의 NVFP4·123B·Qwen 전환 검토는 폐기), `docs/USER_GUIDE.md`, `litellm/config.yaml`(sub-gemma/prod-gemma27b model_list 삭제, fallback 삭제, gemma_compat 콜백 해제), `docker-compose.yml`(gemma_compat 마운트 제거), `litellm/gemma_compat.py`(비활성 명시, 파일은 보존), `scripts/rotate_keys.sh`(전 역할 main+autocomplete만), `scripts/poc_concurrency_smoke.py`, `scripts/audit.sh`. 라이브 반영도 확인(`/v1/models`에 main-llama+autocomplete-starcoder2만 노출, 기존 발급 키의 allowlist도 `/key/update`로 동기화).
+
+### 11.9 실사용 중 발견·해결한 이슈
+| # | 증상 | 원인 | 조치 |
+|---|------|------|------|
+| 13 | OpenCode로 `docker-compose.yml` 읽기 시 `Blocked entity detected: DB_SECRET` 로 요청 자체가 BLOCK | Presidio `DB_SECRET` 정규식이 bash 변수치환 문법(`${VAR:?required}`)을 실제 자격증명으로 오탐(false positive) | `presidio/recognizers/kr_custom.yaml`의 두 패턴에 부정선행탐색(`(?![?=$-])`, `(?!\$)`) 추가. `/analyze` API 직접 호출로 오탐 제거 + 진짜 비밀번호는 계속 탐지되는 회귀 테스트 통과 확인 |
+| 14 | 긴 문서(`OPERATOR_GUIDE.md` 전체)를 컨텍스트에 넣은 요청이 컨텍스트 초과(400) 실패 시, 원인이 가려지는 **이중 오류**(sub-gemma 연결 실패까지 겹침) | `litellm/config.yaml`의 `main-llama→sub-gemma` fallback이 **미기동 백엔드**를 가리키고 있었음 | fallback 설정 제거(§11.8 정책과 함께 영구 조치). 재현 테스트로 이후엔 단일 오류(`Fallbacks=None`)만 발생함을 확인 |
+| 15 | `autocomplete-starcoder2`가 정답 뒤에 관련없는 텍스트를 계속 생성(예: `"a * b + outputId\ndf['age_..."`) — EOS(`<|endoftext|>`)를 안정적으로 못 냄 | StarCoder2-7B 체크포인트 자체의 FIM 종료 토큰 불안정성(특히 컨텍스트 없는 짧은 프롬프트에서 심함) | `litellm/config.yaml`에 서버측 `stop` 목록(FIM 특수토큰 + `\n\n\n`) 추가로 완화(완전 해결은 아님 — 근본 원인은 체크포인트 한계). 단, Continue의 실제 전체 파일 컨텍스트 요청에서는 이 문제가 거의 나타나지 않음을 §11.7에서 확인(짧은 인위적 프롬프트에서만 두드러짐) |
+| 16 | audit_log에서 `sub-gemma` 요청이 반복 실패로 기록됨 | Continue/OpenCode에서 sub-gemma로 모델을 전환해 직접 호출(fallback 아님, `Received Model Group=sub-gemma`로 확인) — 애초에 미기동 모델을 호출한 것 | `opencode.json`에서 sub-gemma 항목 제거(§11.8 정책과 일치) |
+| 17 | `/v1/models`가 config.yaml에서 이미 제거한 `sub-gemma`/`prod-gemma27b`를 계속 노출 | 이 엔드포인트는 라이브 설정이 아니라 **호출 키에 저장된 허용 모델 메타데이터**를 반환함(실제 라우팅은 이미 정상 차단) | `/key/update`로 기존 admin 키의 `models` 필드를 `main-llama, autocomplete-starcoder2`로 동기화 |
+
+### 11.10 동시성 부하 테스트 (main+FIM 2-트랙, RTX PRO 6000)
+| 시나리오 | 요청 수 | 성공률 | 평균 지연 | GPU 메모리 |
+|---|---|---|---|---|
+| main-llama 단독, 동시 8×3라운드 | 24 | 100% | 1.74s | 97,173MiB 사용 / 69MiB 여유, **무변동** |
+| main-llama 단독, 동시 16×3라운드 | 48 | 100% | 1.75s | 동일, 무변동 |
+| 채팅(12)+FIM(12) 혼합 동시 | 24 | 100% | chat 1.74s / FIM 0.68s | 동일, 무변동 |
+
+**발견:** vLLM은 기동 시 KV 캐시 풀을 고정 예약하므로, 동시 요청이 늘어도 **추가 VRAM을 요구하지 않고** 예약된 풀 안에서 처리한다(풀이 차면 큐잉, OOM 아님). 현재 여유(30~1,400MiB)는 부하와 무관하게 이미 고정된 상태였음 — 즉 이 구성의 실질적 동시성 상한에 가깝다. 스크립트: `scripts/poc_concurrency_smoke.py`(§11.8 정책 반영, main-llama 전용으로 갱신됨).
+
+**검토했으나 보류:** FIM 모델을 CodeLlama-13B로 상향하는 안을 검토했으나, VRAM 계산상 main 컨텍스트를 27648→약 9,953 토큰(64% 축소)까지 줄여야 해 에이전트 워크플로우(이미 최대 23K+ 토큰 요구 사례 확인됨)에 심각한 영향이 예상되어 보류. 원인이 모델 크기 문제인지 프롬프트/파라미터 문제인지(§11.9 #15 참조) 먼저 진단 후 재검토 예정.
+
+### 11.11 커밋 이력 (이번 전환 세션)
+```
+d3e2496 운영 전환(phase-prod): 70B 메인 모델 반영
+3c5c1e1 운영 실측 발견사항 반영: PII 오탐 수정 + fallback 설정 정리
+d9f271d opencode.json에서 sub-gemma 제거(운영 선택지 A는 vllm-sub 미기동)
+83e3b42 운영 정책 확정: 서브 채팅 모델(Gemma) 트랙 폐지, main+FIM 2-트랙만 사용
+```
+
+### 11.12 Go-Live 최종 상태 (2026-07-08 기준)
+- **로드된 모델**: `main-llama`(Llama 3.3-70B-Instruct FP8, 컨텍스트 27648) / `autocomplete-starcoder2`(StarCoder2-7B FP8, 컨텍스트 8192) — 이 둘만 상시 기동.
+- **GPU**: 97,173~97,212 / 97,887 MiB 사용(여유 매우 타이트, §11.10 참조).
+- **클라이언트**: OpenCode·VS Code(Continue) 모두 실사용 검증 완료.
+- **거버넌스**: 시크릿 재생성·백업·E2E·audit_log 전부 실측 확인 완료.
+- **판정**: 운영 장비 Go-Live **실행 완료**(§1~10의 "권고"가 아니라 §11에서 실제로 수행·검증됨). 잔여 과제는 §12 참조.
+
+## 12. 잔여 과제 (2026-07-08 기준)
+- 운영 사용자 50인 명단·역할 확보 후 `rotate_keys.sh`로 1인 1키 일괄 발급(현재 admin 키 1개만 발급됨).
+- FIM 자동완성 품질 이슈(§11.9 #15)의 근본 원인 진단 — 모델 교체보다 프롬프트/디코딩 파라미터 튜닝 우선 검토.
+- 더 큰 동시 사용자 규모(예: 50인 근접 부하)의 별도 검증 — 현재는 최대 동시 24건까지만 확인됨.
+- VRAM 여유가 매우 타이트(30~1,400MiB)하므로 운영 중 주기적 재확인 필요(모니터링 권장).
+
+---
+
 ## 부록. 산출물 목록
 
 | 구분 | 산출물 |
@@ -240,4 +350,5 @@
 | 운영 스크립트 | `scripts/`: phase0_bootstrap, rotate_keys, backup, restore, stage_model, deploy_model, audit, anomaly_check, poc_quant_compare, poc_fim_compare, poc_concurrency_smoke |
 | 문서 | `REQUIREMENTS.md`, `TEST_PLAN.md`, `CLAUDE.md`, `docs/OPERATOR_GUIDE.md`, `docs/USER_GUIDE.md`, `docs/POC_FP4_QUANT_COMPARISON.md`, 본 보고서 |
 | 클라이언트 | `opencode.json`, `~/.continue/config.yaml` |
-| 스테이징 모델 | Llama 8B(FP8/NVFP4), Gemma 9B/27B(FP8), StarCoder2-7B(FP8), Qwen2.5-Coder-7B(FP8), Mistral-24B(NVFP4) |
+| 스테이징 모델 | Llama 8B(FP8/NVFP4), Gemma 9B/27B(FP8), StarCoder2-7B(FP8), Qwen2.5-Coder-7B(FP8), Mistral-24B(NVFP4) — 검증장비(5090) |
+| **운영 스테이징 모델** | **Llama 3.3-70B-Instruct(FP8, ~68GB)** — 운영장비(RTX PRO 6000), §11.5 |
