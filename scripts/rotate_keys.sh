@@ -10,11 +10,11 @@
 #   ./rotate_keys.sh delete   <key>
 #   DRY_RUN=1 ./rotate_keys.sh ...   # 호출 페이로드만 출력(실호출 안 함)
 #
-# 정책(REQUIREMENTS FR-3):
+# 정책(REQUIREMENTS FR-3): ★[2026-07-07] 서브 채팅 모델 운영 미채택 → 전 역할 main+autocomplete만, RPM/TPM만 차등
 #   역할        RPM       일토큰    모델
-#   admin       무제한    무제한    전체(main+sub+prod) + 관리
-#   senior      120       200K      main + sub
-#   developer   60        100K      sub 기본 (+ main 허용)
+#   admin       무제한    무제한    main + autocomplete + 관리
+#   senior      120       200K      main + autocomplete
+#   developer   60        100K      main + autocomplete
 #
 # 주의: LiteLLM 키는 분당 tpm_limit 는 지원하나 "일 토큰" 직접 한도는 없다.
 #   → 일 토큰 한도는 tpm_limit(분당) 로 근사하고, 정확한 일일 상한은 이상탐지(FR-7)/budget 으로 보완한다.
@@ -44,17 +44,19 @@ DRY_RUN="${DRY_RUN:-0}"
 role_payload() {
   local role="$1" user_id="${2:-}"
   local meta="{\"role\":\"$role\"$( [[ -n "$user_id" ]] && echo ",\"user_id\":\"$user_id\"" )}"
+  # ★[2026-07-07 운영 결정] 서브 채팅 모델(sub-gemma, prod-gemma27b)은 운영 미채택 →
+  #   전 역할이 main-llama + autocomplete-starcoder2만 사용. 역할 차등은 rpm/tpm 한도로만 구분.
   case "$role" in
     admin)
-      # 무제한: rpm/tpm 미설정. 전체 모델(자동완성 포함).
-      echo "{\"models\":[\"main-llama\",\"sub-gemma\",\"prod-gemma27b\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"admin-${user_id:-shared}-$(date +%Y%m%d)\",\"metadata\":$meta}"
+      # 무제한: rpm/tpm 미설정. main + 자동완성.
+      echo "{\"models\":[\"main-llama\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"admin-${user_id:-shared}-$(date +%Y%m%d)\",\"metadata\":$meta}"
       ;;
     senior)
-      echo "{\"rpm_limit\":120,\"tpm_limit\":200000,\"models\":[\"main-llama\",\"sub-gemma\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"senior-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
+      echo "{\"rpm_limit\":120,\"tpm_limit\":200000,\"models\":[\"main-llama\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"senior-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
       ;;
     developer)
       # ★autocomplete-starcoder2 포함: IDE tab 자동완성(FIM)은 모든 개발자가 사용
-      echo "{\"rpm_limit\":60,\"tpm_limit\":100000,\"models\":[\"sub-gemma\",\"main-llama\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"dev-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
+      echo "{\"rpm_limit\":60,\"tpm_limit\":100000,\"models\":[\"main-llama\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"dev-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
       ;;
     *) echo "알 수 없는 역할: $role (admin|senior|developer)" >&2; return 2 ;;
   esac

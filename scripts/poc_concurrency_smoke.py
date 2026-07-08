@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""scripts/poc_concurrency_smoke.py — B-3 소규모 동시성 스모크 (TEST_PLAN B-3)
+"""scripts/poc_concurrency_smoke.py — 소규모 동시성 스모크 (TEST_PLAN B-3 기원, 운영 main+autocomplete 대상)
 
-LiteLLM(4000) 게이트웨이로 main/sub 모델에 동시 요청을 보내, 분배·KV 캐시 안정성을 본다.
+LiteLLM(4000) 게이트웨이로 main-llama(+autocomplete-starcoder2)에 동시 요청을 보내, KV 캐시 안정성을 본다.
+★[2026-07-07] 서브 채팅 모델(sub-gemma) 운영 미채택으로 태스크를 main-llama 위주로 갱신.
 가벼운 부하만(50인 풀로드는 운영 장비). 동시 N개를 여러 라운드 반복.
 
 사용:
@@ -14,16 +15,16 @@ CONCURRENCY = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 ROUNDS = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 BASE = "http://localhost:4000"
 
-# main/sub 를 섞어 요청 (분배 검증). 작업 유형도 섞음.
+# 운영 채택 모델(main-llama)만 사용. 작업 유형(길이/언어)은 섞어 다양성 확보.
 TASKS = [
     ("main-llama", "Explain quicksort in two sentences."),
-    ("sub-gemma", "2 더하기 3은?"),
+    ("main-llama", "2 더하기 3은? 숫자만 답하세요."),
     ("main-llama", "Write a one-line Python list comprehension for squares of 1..5."),
-    ("sub-gemma", "What color is the sky? One word."),
+    ("main-llama", "What color is the sky? One word."),
     ("main-llama", "Summarize TCP in one sentence."),
-    ("sub-gemma", "파이썬에서 리스트 길이 구하는 함수?"),
+    ("main-llama", "파이썬에서 리스트 길이 구하는 함수?"),
     ("main-llama", "Name three sorting algorithms."),
-    ("sub-gemma", "1부터 5까지 더하면?"),
+    ("main-llama", "1부터 5까지 더하면? 숫자만 답하세요."),
 ]
 
 results = []  # (model, ok, latency, tokens, err)

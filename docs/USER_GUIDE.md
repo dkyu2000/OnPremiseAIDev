@@ -27,14 +27,13 @@
 
 | 모델 | 용도 | IDE에서 |
 |------|------|---------|
-| **main-llama** (Llama) | 채팅·코드설명·리팩터링·**에이전트(도구 사용)** | 채팅·편집의 기본 |
-| **sub-gemma** (Gemma) | 가벼운 채팅·짧은 질의 | 채팅(빠른 응답용) |
+| **main-llama** (Llama 3.3-70B) | 채팅·코드설명·리팩터링·**에이전트(도구 사용)** | 채팅·편집의 기본(유일한 채팅 모델) |
 | **autocomplete-starcoder2** (StarCoder2) | **tab 자동완성** | 코드 편집기에서 자동 동작 |
 
 **핵심 가이드**
 - **코드 작성 중 자동완성(회색 제안)** → StarCoder2가 **자동으로** 담당. 모델을 고를 필요 없습니다.
-- **채팅으로 질문/리팩터링/에이전트 작업** → **main-llama** 권장.
-- **Gemma는 채팅 전용**입니다. 파일 편집·도구 실행 같은 에이전트 작업에는 쓸 수 없으니, 그런 작업은 main-llama를 선택하세요.
+- **채팅으로 질문/리팩터링/에이전트 작업** → **main-llama**를 사용합니다(채팅 모델은 이거 하나뿐입니다).
+- ★가벼운 서브 채팅 모델(Gemma)은 운영에서 사용하지 않습니다 — 짧은 질문도 main-llama가 처리합니다.
 
 ---
 
@@ -58,8 +57,7 @@ OpenCode는 터미널/IDE에서 동작하는 AI 코딩 에이전트입니다.
         "apiKey": "{env:OPENCODE_LITELLM_KEY}"
       },
       "models": {
-        "main-llama": { "name": "Llama (채팅·에이전트)" },
-        "sub-gemma":  { "name": "Gemma (채팅)" }
+        "main-llama": { "name": "Llama (채팅·에이전트)" }
       }
     }
   }
@@ -75,7 +73,6 @@ export OPENCODE_LITELLM_KEY=sk-...본인키...
 ```bash
 opencode                                   # 대화형 TUI 실행
 opencode run "이 함수의 시간복잡도는?"       # 비대화형 한 번 실행
-opencode run -m litellm-onprem/sub-gemma "간단한 질문"   # 모델 지정
 ```
 - TUI 안에서 `/models` 로 모델 전환, 일반 대화처럼 질문/지시.
 - main-llama는 도구(bash/파일편집)를 사용해 실제 작업을 수행합니다.
@@ -100,12 +97,6 @@ models:
     apiBase: http://<사내서버>:4000/v1
     apiKey: sk-...본인키...
     roles: [chat, edit, apply]
-  - name: Gemma (채팅)
-    provider: openai
-    model: sub-gemma
-    apiBase: http://<사내서버>:4000/v1
-    apiKey: sk-...본인키...
-    roles: [chat]
   - name: StarCoder2 (자동완성)
     provider: openai
     model: autocomplete-starcoder2
@@ -116,7 +107,7 @@ models:
 
 ### 채팅 사용
 1. 왼쪽 사이드바 **Continue 아이콘(∞)** 클릭 (안 보이면 `Ctrl+Shift+P` → `Continue: Focus on Continue View`)
-2. 채팅창 아래 **모델 드롭다운**에서 **Llama** 또는 **Gemma** 선택
+2. 채팅창 아래 **모델 드롭다운**에서 **Llama** 선택(채팅 모델은 이거 하나뿐입니다)
 3. 질문 입력. 코드를 선택하고 `Ctrl+L` → "이 함수 설명해줘" 처럼 사용.
 
 ### tab 자동완성 사용
@@ -162,9 +153,6 @@ models:
 
 **Q. 요청이 차단(400)됐어요.**
 - 프롬프트에 DB 비밀번호/시크릿 패턴이 포함됐을 수 있습니다. 민감정보를 빼고 다시 시도하세요.
-
-**Q. Gemma로 파일 편집/에이전트 작업이 안 돼요.**
-- Gemma는 채팅 전용입니다. 도구를 쓰는 작업은 **main-llama**를 선택하세요.
 
 **Q. 외부 인터넷 AI처럼 최신 정보를 물어봐도 되나요?**
 - 이 모델들은 사내 폐쇄망에서 동작하며 외부 검색을 하지 않습니다. 코드/기술 작업에 활용하세요.

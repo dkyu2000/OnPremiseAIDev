@@ -7,7 +7,8 @@
 # 사용:
 #   ./audit.sh recent [N]            최근 N건 요청 (기본 20)
 #   ./audit.sh user <user_id> [N]    특정 사용자(가상키 alias) 요청
-#   ./audit.sh model <model> [N]     특정 모델 요청 (main-llama|sub-gemma|autocomplete-starcoder2|prod-gemma27b)
+#   ./audit.sh model <model> [N]     특정 모델 요청 (main-llama|autocomplete-starcoder2 — 운영 채택 모델.
+#                                    sub-gemma|prod-gemma27b는 Phase B/C 역사적 검증 데이터에만 존재)
 #   ./audit.sh detail <id>           단일 레코드 전체(프롬프트/출력 전문 포함)
 #   ./audit.sh pending               미완료(취소/진행중) 요청
 #   ./audit.sh errors [N]            오류 요청

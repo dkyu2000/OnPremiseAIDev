@@ -58,15 +58,19 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
 
 ## 5. 모델 구성 (테스트 장비 전용)
 
-검증 목적별로 **두 트랙**을 분리한다.
+**★[2026-07-07 운영 결정 확정] 운영 채택 구성 = 2-트랙 고정: `Llama 3.3-70B FP8`(채팅·에이전트) + `StarCoder2-7B FP8`(FIM 자동완성).**
+서브 채팅 모델(Gemma 트랙)은 **앞으로 모든 환경(검증·운영)에서 사용하지 않는다.** 이유: ①운영 96GB 카드에서
+main(70B)+FIM만으로도 VRAM 여유가 ~1.4GB로 이미 타이트해 서브 모델 추가 여유가 없음, ②단일 채팅 모델로 라우팅을
+단순화(운영 복잡도·장애 지점 감소). 아래 서브/2-트랙-라우팅 항목은 **과거 검증 기록**(Phase B/C, 통과함)이며,
+현재·향후 운영 구성에는 반영하지 않는다.
 
-- **운영 서브 모델 실검증:** `Gemma 2-27B (FP8, ~27GB)` 단일 — 운영에 실제로 들어갈 모델을 SM120에서 실측.
-- **2-트랙 라우팅 패턴 검증:** `Llama 3.1-8B-Instruct (FP8, ~8GB)` [메인 프록시] + `Gemma 2-9B-it (FP8, ~9GB)` [서브]
-  - vLLM 인스턴스 2개(포트 8000/8001)를 한 카드에 `--gpu-memory-utilization` 분할로 동시 상주.
-  - LiteLLM(4000)이 라우팅 매트릭스(§REQUIREMENTS FR-8)에 따라 분기.
+- **채택(운영 고정):** `Llama 3.3-70B FP8`(main, ~70GB) + `StarCoder2-7B FP8`(FIM 자동완성, ~7GB). 합 ~77GB, KV 여유 ~19GB(96GB 카드 기준).
+  LiteLLM(4000)은 이 두 모델만 라우팅한다(sub/fallback 없음).
+- **[역사적 검증 기록, 미채택] 운영 서브 모델 실검증:** `Gemma 2-27B (FP8, ~27GB)` 단일 — Phase C에서 실측 통과했으나 운영 미채택.
+- **[역사적 검증 기록, 미채택] 2-트랙 라우팅 패턴 검증:** `Llama 3.1-8B-Instruct (FP8, ~8GB)` [메인 프록시] + `Gemma 2-9B-it (FP8, ~9GB)` [서브]
+  — Phase B에서 vLLM 인스턴스 2개(포트 8000/8001) 동시상주·라우팅 분기를 실측 통과했으나 운영 미채택.
 - **IDE tab 자동완성(FIM) 검증:** `StarCoder2-7B (FP8, ~8GB)` [autocomplete] — Llama/Gemma(instruct)는 FIM 미지원이라
-  inline 자동완성 불가 → FIM 전용 코드 모델 별도. phase-ide 프로파일(main+autocomplete)로 검증(포트 8003).
-  운영 최적 구성: **Llama 3.3-70B FP8(채팅·에이전트) + StarCoder2-7B FP8(자동완성)** 2-트랙(96GB 단일 카드).
+  inline 자동완성 불가 → FIM 전용 코드 모델 별도. phase-ide 프로파일(main+autocomplete)로 검증(포트 8003), phase-prod로 운영 채택.
 - 중국계 모델(Qwen/DeepSeek 등)은 **보안 정책상 사용 금지** (제안서 기준) — 자동완성 모델도 비중국계(StarCoder2/CodeLlama)로 한정.
 
 ## 6. 🚫 금지 사항 (Never Do)
@@ -92,7 +96,8 @@ docker compose down
 
 # 헬스체크
 curl -s http://localhost:8000/health        # vLLM (main)
-curl -s http://localhost:8001/health        # vLLM (sub, Phase B)
+curl -s http://localhost:8003/health        # vLLM (autocomplete, 운영 채택)
+curl -s http://localhost:8001/health        # vLLM (sub, Phase B — 역사적 검증용, 운영 미사용)
 curl -s http://localhost:4000/health        # LiteLLM gateway
 
 # 로그

@@ -17,7 +17,7 @@
 #    served-model-name(=compose의 --served-model-name)을 openai/<name>으로 지정
 # ──────────────────────────────────────────────────────────────────────────
 model_list:
-  # 메인 (Phase A/B) — Llama 3.1-8B-Instruct FP8
+  # 메인 — Llama 3.3-70B-Instruct FP8 (운영 채택, phase-prod). MAIN_MODEL_PATH로 검증(8B)/운영(70B) 전환.
   - model_name: main-llama
     litellm_params:
       model: openai/main-llama
@@ -26,27 +26,16 @@ model_list:
     model_info:
       mode: chat
 
-  # 서브 (Phase B) — Gemma 2-9B-it FP8
-  - model_name: sub-gemma
-    litellm_params:
-      model: openai/sub-gemma
-      api_base: http://vllm-sub:8000/v1
-      api_key: "dummy"
-    model_info:
-      mode: chat
-      # ★Gemma 2 는 ① chat template 이 tools/function 미지원 + ② system role 거부
-      #   (raise_exception 'System role not supported'). 따라서 tool calling/system prompt 를 쓰는
-      #   에이전트(OpenCode 등)에는 구조적으로 부적합 → 자동완성·단순 채팅 용도 전용(FR-8 라우팅 설계).
-      #   supports_function_calling:false 는 capability 메타데이터 표시용(이 버전 LiteLLM 의 drop_params 는
-      #   tools 를 자동 제거하지 못함). 에이전트 클라이언트는 main-llama 로 라우팅한다(opencode.json 참조).
-      supports_function_calling: false
-
   # IDE 자동완성(FIM) — StarCoder2-7B FP8 (phase-ide). /v1/completions 의 prompt+suffix 로 FIM.
   - model_name: autocomplete-starcoder2
     litellm_params:
       model: openai/autocomplete-starcoder2
       api_base: http://vllm-autocomplete:8000/v1
       api_key: "dummy"
+      # ★[2026-07-07 실측] StarCoder2가 EOS(<|endoftext|>)를 안정적으로 내지 못해 정답 뒤에
+      #   관련없는 텍스트를 계속 생성(예: "a * b + outputId\ndf['age_..."). 클라이언트가 stop을
+      #   안 보내는 경우를 대비해 서버 기본값으로 FIM 특수토큰 + 3줄 개행에서 강제 종료.
+      stop: ["<|endoftext|>", "<fim_prefix>", "<fim_suffix>", "<fim_middle>", "<file_sep>", "<repo_name>", "\n\n\n"]
     model_info:
       mode: completion          # ★chat 아님: FIM 자동완성은 completion 엔드포인트
       supports_function_calling: false
@@ -61,38 +50,22 @@ model_list:
       mode: completion
       supports_function_calling: false
 
-  # 운영 서브 실검증 (Phase C) — Gemma 2-27B FP8 (단독 기동)
-  - model_name: prod-gemma27b
-    litellm_params:
-      model: openai/prod-gemma27b
-      api_base: http://vllm-gemma27b:8000/v1
-      api_key: "dummy"
-    model_info:
-      mode: chat
-      supports_function_calling: false   # ★Gemma2 동일(위 sub-gemma 참조)
-
 # ──────────────────────────────────────────────────────────────────────────
-# 2) 라우팅 / 폴백 (FR-8)  — ★최상위 router_settings
-#    ※ "토큰 길이·작업 유형 → 모델 자동 선택"은 LiteLLM 기본 기능이 아니다.
-#      [권장] 클라이언트(OpenCode/IDE)가 용도별로 모델명을 직접 지정
-#             - 자동완성/짧은 Q&A → "sub-gemma"
-#             - JIRA/로그/문서/복잡추론 → "main-llama"
-#      [선택·고급] 커스텀 pre-call 훅으로 토큰 수 기반 모델 재지정.
-#    fallbacks/context_window_fallbacks 는 router_settings 에 둔다(litellm_settings보다 우선).
+# ★[2026-07-07 운영 결정] 서브 채팅 모델(sub-gemma, prod-gemma27b)은 model_list에서 제외했다.
+#   Phase B/C에서 검증은 통과했으나 운영에서 서브 채팅 트랙 자체를 쓰지 않기로 확정(CLAUDE.md §5,
+#   OPERATOR_GUIDE §10 선택지 A 참조). 역사적 재검증이 필요하면 git 이력에서 이 블록을 복원하고
+#   docker-compose --profile phase-b/phase-c 로 백엔드를 별도 기동할 것.
+# ──────────────────────────────────────────────────────────────────────────
+# 2) 라우팅 (FR-8)  — ★최상위 router_settings
+#    ★[2026-07-07 운영 결정] 서브 채팅 모델을 쓰지 않기로 확정 → 채팅/에이전트는 전부 "main-llama",
+#    tab 자동완성만 "autocomplete-starcoder2"로 클라이언트가 직접 지정하는 단순 2-분기 구조.
+#    fallback 대상(서브)이 없으므로 fallbacks/context_window_fallbacks는 설정하지 않는다 — 예전에
+#    main-llama→sub-gemma fallback을 남겨뒀다가 sub 백엔드 미기동 상태에서 main 요청이 실패할 때마다
+#    "fallback 시도 → 연결 실패"까지 겹치는 이중 오류가 재현된 바 있다(예: 컨텍스트 초과 시).
 # ──────────────────────────────────────────────────────────────────────────
 router_settings:
   routing_strategy: simple-shuffle
   enable_pre_call_checks: true     # 컨텍스트 한도 기반 사전 점검 활성
-
-  # ★[2026-07-07 실측] 운영(phase-prod, 선택지 A)은 vllm-sub 컨테이너를 기동하지 않는다(2-트랙: main+FIM만).
-  #   fallback 대상이 실제로 떠 있지 않은 채로 두면, main-llama 요청이 어떤 이유로든 실패할 때마다
-  #   (예: 컨텍스트 초과) "fallback 시도 → sub-gemma 연결 실패(InternalServerError)"까지 겹쳐 원인이
-  #   가려지는 이중 오류가 발생한다(OpenCode에서 재현: context_window_exceeded 뒤에 connection error 중첩).
-  #   → phase-a/b(sub-gemma 기동)로 되돌릴 때만 아래 두 블록 주석 해제.
-  # fallbacks:
-  #   - main-llama: ["sub-gemma"]
-  # context_window_fallbacks:
-  #   - sub-gemma: ["main-llama"]
 
 # ──────────────────────────────────────────────────────────────────────────
 # 3) PII 마스킹 (FR-6) — ★최상위 guardrails / Presidio (자체 호스팅, OSS)
@@ -140,7 +113,9 @@ litellm_settings:
   # LiteLLM_SpendLogs 에 적재된다. PROMPT 해시(위변조 검증)·이상탐지는 커스텀 콜백으로 보강:
   #   - ./litellm/audit_logger.py 가 compose에서 /app/audit_logger.py 로 마운트됨
   #   - audit_log / anomaly_alerts 테이블에 비동기(async)로 적재 → 동기 응답 경로 비차단
-  callbacks: ["audit_logger.audit_handler", "gemma_compat.gemma_compat_handler", "autocomplete_compat.autocomplete_compat_handler"]
+  # ★gemma_compat 콜백은 제외했다(2026-07-07) — Gemma(sub-gemma/prod-gemma27b) 자체를 운영에서 쓰지
+  #   않으므로 불필요. 파일은 litellm/gemma_compat.py에 보존(향후 재검토 시 참조).
+  callbacks: ["audit_logger.audit_handler", "autocomplete_compat.autocomplete_compat_handler"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY     # 서버 측 전용. 클라이언트엔 가상 키만.
@@ -161,5 +136,5 @@ general_settings:
 #   프롬프트/응답을 받아 audit_log 테이블에 보강 적재하므로 5필드 자체는 충족된다.
 # - KR_RRN/DB_SECRET 는 Presidio 표준 엔티티가 아니다 → presidio-analyzer 에 custom recognizer
 #   (presidio/recognizers/kr_custom.yaml)를 반드시 로드해야 인식된다. 미반영 시 두 엔티티는 무시됨.
-# - Phase A에서는 main-llama만 백엔드가 떠 있다(sub/prod 백엔드는 해당 프로파일에서 기동).
-#   sub-gemma/prod-gemma27b 호출은 그 프로파일에서만 정상.
+# - 운영(phase-prod)은 main-llama + autocomplete-starcoder2 두 백엔드만 상시 기동한다.
+#   sub-gemma/prod-gemma27b는 model_list에서 제외했으므로 호출 시 "model not found" 오류가 정상이다.

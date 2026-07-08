@@ -3,10 +3,12 @@
 # 호스트 전제: NVIDIA Driver 570+ / nvidia-container-toolkit 설치됨 (드라이버는 호스트 직접 설치, 컨테이너화 불가)
 #
 # Compose 프로파일로 Phase를 분리한다 (VRAM 32GB라 동시 실행 불가 조합 존재):
-#   docker compose --profile phase-a up -d   # core + vllm-main (단일 모델 + 거버넌스 검증)
-#   docker compose --profile phase-b up -d   # core + vllm-main + vllm-sub (2-트랙 라우팅)
-#   docker compose --profile phase-c up -d   # core + vllm-gemma27b (운영 서브 모델 실검증, ★단독 실행)
+#   docker compose --profile phase-prod up -d  # ★운영 채택: core + vllm-main(70B) + vllm-autocomplete(FIM)
+#   docker compose --profile phase-a up -d   # core + vllm-main (단일 모델 + 거버넌스 검증, 검증용 8B)
+#   docker compose --profile phase-b up -d   # core + vllm-main + vllm-sub (2-트랙 라우팅) — ★역사적 검증 전용, 운영 미사용
+#   docker compose --profile phase-c up -d   # core + vllm-gemma27b (운영 서브 모델 실검증, ★단독 실행) — ★역사적 검증 전용, 운영 미사용
 # core 서비스(postgres/presidio/litellm)는 프로파일이 없어 항상 기동된다.
+# ★[2026-07-07 운영 결정] 서브 채팅 모델(Gemma) 트랙은 앞으로 사용하지 않는다 — main+autocomplete 2-트랙만 채택.
 #
 # ⚠ 모든 이미지/모델 가중치는 사전 스테이징(오프라인 반입)된 것만 사용한다. (REQUIREMENTS FR-10 / NFR-1)
 # ⚠ 이미지 태그는 빌드 시점에 확정 후 .env에 고정한다. latest 금지. (NFR-2)
@@ -72,7 +74,7 @@ services:
       retries: 30
       start_period: 600s                   # ★70B(~70GB) 가중치 로드 시간 고려(8B/9B 대비 여유있게)
 
-  vllm-sub:                                # Phase B: 서브 (Gemma 2-9B-it FP8)
+  vllm-sub:                                # Phase B: 서브 (Gemma 2-9B-it FP8) — ★역사적 검증 전용, 운영 미사용(2026-07-07)
     <<: *vllm-common
     profiles: ["phase-b"]
     container_name: vllm-sub
@@ -142,7 +144,7 @@ services:
       retries: 20
       start_period: 300s
 
-  vllm-gemma27b:                           # Phase C: 운영 서브 모델 실검증 (Gemma 2-27B FP8 ~27GB)
+  vllm-gemma27b:                           # Phase C: 운영 서브 모델 실검증 (Gemma 2-27B FP8 ~27GB) — ★역사적 검증 전용, 운영 미사용(2026-07-07)
     <<: *vllm-common                       # ★VRAM 거의 다 사용 → phase-b 서비스와 동시 실행 금지(단독)
     profiles: ["phase-c"]
     container_name: vllm-gemma27b
@@ -183,8 +185,9 @@ services:
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro       # 라우팅·가드레일·로깅 정의
       - ./litellm/audit_logger.py:/app/audit_logger.py:ro  # ★FR-5/FR-7 커스텀 콜백 (config callbacks 참조)
-      - ./litellm/gemma_compat.py:/app/gemma_compat.py:ro  # ★Gemma2 호환 pre-call 변환(system 병합+tools 제거)
       - ./litellm/autocomplete_compat.py:/app/autocomplete_compat.py:ro  # ★Qwen 자동완성 FIM 토큰 정규화
+      # ★gemma_compat.py 마운트 제거(2026-07-07) — Gemma(sub-gemma/prod-gemma27b) 운영 미채택으로
+      #   config.yaml callbacks에서도 제외됨. 파일 자체는 litellm/gemma_compat.py에 보존.
     environment:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?master key 필요}
       - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:?required}@postgres:5432/litellm

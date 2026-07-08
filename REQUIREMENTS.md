@@ -31,22 +31,27 @@
 
 ### FR-1. 추론 서빙 (vLLM)
 - vLLM v0.17.0+로 OpenAI 호환 API(`/v1/...`) 제공. `VLLM_FLASH_ATTN_VERSION=2`.
-- 모델 구성은 `CLAUDE.md §5`를 따른다(Gemma 2-27B 단일 / Llama 8B + Gemma 9B 듀얼).
+- 모델 구성은 `CLAUDE.md §5`를 따른다. **운영 채택: Llama 3.3-70B FP8(main) + StarCoder2-7B FP8(autocomplete) 2-트랙만.**
+  Gemma 서브 트랙(2-27B 단일 / Llama 8B+Gemma 9B 듀얼)은 Phase B/C에서 검증 통과했으나 운영 미채택(역사적 기록).
 - **AC:** `curl /v1/chat/completions`가 정상 응답하며, 출력에 garbage character가 없다. `/health` 200.
 
 ### FR-2. 게이트웨이 (LiteLLM)
-- OpenAI 호환 엔드포인트를 포트 **4000**으로 제공, 백엔드 vLLM(8000/8001)을 프록시.
+- OpenAI 호환 엔드포인트를 포트 **4000**으로 제공, 백엔드 vLLM(8000 main / 8003 autocomplete)을 프록시.
+  (8001 sub은 Phase B 역사적 검증 전용, 운영 미사용)
 - 마스터 키는 서버 측에만, 클라이언트는 가상 키 사용. PostgreSQL 백엔드.
 - **AC:** 가상 키로 `/v1/chat/completions` 호출 성공, 마스터 키 미노출.
 
 ### FR-3. 3-Tier API Key 정책
 역할별 가상 키를 발급하고 한도·모델 권한을 차등 적용한다(제안서 기준).
 
+★[2026-07-07 갱신] 서브 채팅 모델을 운영에서 사용하지 않기로 확정 → 전 역할이 **main + autocomplete**만 사용하며,
+역할 차등은 RPM/토큰 한도로만 구분한다(모델 allowlist 차등 없음).
+
 | 역할 | RPM | 일 토큰 | 사용 가능 모델 |
 |------|-----|---------|----------------|
-| 관리자 | 무제한 | 무제한 | 전체 + 관리 콘솔 |
-| 시니어 개발자 | 120 | 200K | main + sub |
-| 일반 개발자·PM | 60 | 100K | sub 기본 (main 요청 시 허용) |
+| 관리자 | 무제한 | 무제한 | main + autocomplete + 관리 콘솔 |
+| 시니어 개발자 | 120 | 200K | main + autocomplete |
+| 일반 개발자·PM | 60 | 100K | main + autocomplete |
 
 - 발급은 `/key/generate`에 `rpm_limit`, `tpm_limit`(또는 `max_budget`/`budget_duration`), `models`(allowlist) 포함.
 - 키 라이프사이클: 1인 1키, 90일 강제 로테이션(스크립트), 퇴사/이동 시 즉시 비활성화.
@@ -83,27 +88,34 @@
 - **AC:** 합성 트래픽으로 두 룰이 각각 트리거되어 경보 레코드가 생성됨.
 
 ### FR-8. 모델 라우팅
-요청 토큰 길이·작업 유형·권한으로 main/sub 분기. 라우팅 매트릭스:
+★[2026-07-07 갱신] 서브 채팅 모델 운영 미채택 확정 → **작업 유형과 무관하게 채팅/에이전트는 전부 main, IDE tab
+자동완성만 autocomplete로 분기**하는 2-분기 구조로 단순화. 아래는 그 갱신된 매트릭스다:
 
 | 작업 유형 | 토큰 | 결과 |
 |-----------|------|------|
 | **IDE tab 자동완성(라인/블록)** | <4K | **autocomplete (StarCoder2-7B FIM)** |
-| 짧은 Q&A·채팅 | <2K | sub (Gemma) |
-| CLI Agent 단순 명령 | <2K | sub |
-| JIRA 티켓 분석 | 4K–16K | main (Llama) |
-| 로그 분석/원인 추적 | 8K+ | main |
-| 기술 문서 작성 | 4K+ | main |
+| 짧은 Q&A·채팅 | any | main (Llama) |
+| CLI Agent 단순 명령 | any | main |
+| JIRA 티켓 분석 | any | main |
+| 로그 분석/원인 추적 | any | main |
+| 기술 문서 작성 | any | main |
 | 복잡 알고리즘 설계 | any | main |
-| CLI Agent 복합 워크플로우 | 4K+ | main |
+| CLI Agent 복합 워크플로우 | any | main |
 
 > ★**[검증 정정 2026-06] tab 자동완성은 sub(Gemma)가 아니라 FIM 전용 코드 모델로 분기한다.**
 > Llama/Gemma 등 instruct 모델은 FIM(Fill-in-the-Middle) 토큰이 없어 prefix+suffix 기반 inline 자동완성이
 > 불가하다(실측: 두 모델 tokenizer에 FIM 토큰 없음). StarCoder2-7B(FP8, BigCode, 비중국계)는 FIM 토큰 보유 →
 > SM120에서 inline 자동완성 정상 동작 확인. 자동완성은 `/v1/completions`(prompt+suffix), 채팅/에이전트는
-> `/v1/chat/completions` 로 경로 자체가 다르다. 운영도 채팅(Llama 70B) + 자동완성(StarCoder2/CodeLlama) 분리 권장.
+> `/v1/chat/completions` 로 경로 자체가 다르다.
 
-- 예외: ① `model=` 명시 시 권한 범위 내 직접 사용, ② main 헬스체크 실패 시 sub로 **Fallback**, ③ Rate Limit 초과 429, ④ 보안 위반 400(PII BLOCK, 실측), 권한 위반 403.
-- **AC:** 매트릭스 대표 케이스가 의도한 모델로 라우팅됨. main 인스턴스 중지 시 sub로 fallback.
+> ★**[2026-07-07 운영 결정] 서브 채팅 모델(Gemma 트랙) 미채택.** Phase B(2-트랙 라우팅)·Phase C(27B 서브 실검증) 모두
+> 기술적으로는 검증 통과했으나, 운영 96GB 카드에서 main(70B)+autocomplete만으로 이미 VRAM 여유가 ~1.4GB로
+> 타이트하고, 단일 채팅 모델로 라우팅을 단순화하는 편이 운영 복잡도·장애 지점 관리에 유리하다고 판단해 서브 트랙은
+> 채택하지 않는다. main 실패 시 sub로 넘길 대상 자체가 없으므로 **fallback 라우팅도 사용하지 않는다**(연결 안 된
+> 백엔드로 fallback 시도 시 원인이 가려지는 이중 오류가 발생함이 실측 확인됨 → `litellm/config.yaml` fallback 제거).
+
+- 예외: ① `model=` 명시 시 권한 범위 내 직접 사용, ② Rate Limit 초과 429, ③ 보안 위반 400(PII BLOCK, 실측), 권한 위반 403.
+- **AC:** 매트릭스 대표 케이스가 의도한 모델로 라우팅됨(채팅/에이전트→main, tab 자동완성→autocomplete).
 
 ### FR-9. 클라이언트 연동 (OpenCode + IDE)
 - OpenCode(및 VS Code/IntelliJ 플러그인)를 LiteLLM(4000) + 가상 키로 연결.
@@ -146,6 +158,8 @@
   **PoC 품질 비교(`docs/POC_FP4_QUANT_COMPARISON.md`, 2026-06-30):** 8B-FP8 / 8B-NVFP4 / 24B-NVFP4 3-way 측정 결과 —
   까다로운 추론에선 **모델 크기 ≫ 양자화**(24B-NVFP4 가 8B-FP8 압도) → 70B-NVFP4 전략 지지. 단 **FP4 반복붕괴(degeneration)
   리스크는 작은 모델 한정**(8B-NVFP4 긴 한국어 추론에서 붕괴, 24B-NVFP4 안정) → **대형=NVFP4 / 소형(자동완성·서브)=FP8** 권장.
+  ★[2026-07-07 운영 결정] 이 3-트랙(70B-NVFP4+27B-FP8 서브+FIM) 구성은 **서브 채팅 모델 미채택 결정에 따라 운영에
+  적용하지 않는다.** 대신 아래 2-트랙 FP8 구성을 채택한다(실측 안정성 우선).
 - **[확정] IDE tab 자동완성 = FIM 전용 코드 모델 추가:** Llama 3.3-70B/Gemma 2(instruct)는 FIM 미지원이라 제대로 된
   tab 자동완성 불가(실측 확인). → **자동완성 전용 FIM 코드 모델**(StarCoder2-7B/CodeLlama-7B 등, 비중국계)을
   별도 배포해야 한다. 검증장비(5090)에서 StarCoder2-7B FP8 FIM inline 자동완성 SM120 동작 확인.

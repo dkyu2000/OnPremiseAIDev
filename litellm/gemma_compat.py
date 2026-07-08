@@ -1,6 +1,12 @@
 """
 litellm/gemma_compat.py — Gemma 2 호환 게이트웨이 변환 (LiteLLM pre-call hook)
 
+★[2026-07-07 비활성] 서브 채팅 모델(sub-gemma, prod-gemma27b)을 운영에서 쓰지 않기로 확정하면서
+  litellm/config.yaml의 callbacks 목록과 docker-compose.yml의 volumes 마운트에서 제외했다.
+  현재 이 파일은 어디서도 로드되지 않는다(비활성). Phase B/C 역사적 검증에서 실제로 문제를 해결한
+  코드라 참고용으로 보존한다 — Gemma 트랙을 재검토할 경우 config.yaml/docker-compose.yml에
+  다시 연결하면 된다(git 이력 참조).
+
 배경:
   Gemma 2 chat template 은 ① system role 거부(raise_exception 'System role not supported'),
   ② tools/function 미지원이다. 그래서 OpenCode 등 에이전트 클라이언트(system prompt + tools 사용)가
