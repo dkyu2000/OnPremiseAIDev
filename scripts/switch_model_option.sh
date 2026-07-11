@@ -137,7 +137,10 @@ for i, line in enumerate(lines):
     m2 = re.match(r'^\s*model:\s*(\S+)\s*$', line)
     if m2 and m2.group(1) in targets and targets[m2.group(1)] and last_name_idx is not None:
         idx, prefix = last_name_idx
-        lines[idx] = f"{prefix}{targets[m2.group(1)]}\n"
+        # ★반드시 큰따옴표로 감쌀 것: 라벨에 ": "(콜론+공백)이 들어가면 따옴표 없는 YAML
+        #   스칼라가 매핑으로 잘못 해석돼 config.yaml 전체 파싱이 깨진다(실측 확인된 버그).
+        safe_val = targets[m2.group(1)].replace('"', '\\"')
+        lines[idx] = f'{prefix}"{safe_val}"\n'
         changed.append(m2.group(1))
         last_name_idx = None
 with open(path, 'w') as f:
@@ -145,6 +148,36 @@ with open(path, 'w') as f:
 print("갱신됨:", changed if changed else "(대상 없음)")
 PYEOF
     ok "~/.continue/config.yaml 라벨 갱신 시도 완료(형식이 예상과 다르면 수동 확인 필요)"
+  fi
+
+  # ★Continue는 "현재 선택된 모델"을 이름(문자열)으로 캐싱한다(~/.continue/index/globalContext.json).
+  #   config.yaml의 라벨만 바꾸고 이 캐시를 안 맞춰주면, 캐시가 가리키는 이름이 더 이상 models 목록에
+  #   없어 UI 드롭다운이 통째로 비어 보이는 문제가 실측 확인됨. 항상 함께 갱신한다.
+  local continue_ctx="$HOME/.continue/index/globalContext.json"
+  if [[ -f "$continue_ctx" ]] && command -v python3 >/dev/null 2>&1; then
+    log "~/.continue/index/globalContext.json 선택 캐시 갱신(best-effort)"
+    python3 - "$continue_ctx" "$main_label" "$ac_label" <<'PYEOF'
+import json, sys
+path, main_label, ac_label = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path) as f:
+        d = json.load(f)
+    sel = d.get("selectedModelsByProfileId", {}).get("local")
+    if sel is not None:
+        if main_label:
+            for k in ("chat", "edit", "apply"):
+                if k in sel and sel[k] is not None:
+                    sel[k] = main_label
+        if ac_label and "autocomplete" in sel and sel["autocomplete"] is not None:
+            sel["autocomplete"] = ac_label
+        with open(path, "w") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        print("갱신됨")
+    else:
+        print("selectedModelsByProfileId.local 없음 — 스킵")
+except Exception as e:
+    print(f"스킵(형식 다름): {e}")
+PYEOF
   fi
 }
 
