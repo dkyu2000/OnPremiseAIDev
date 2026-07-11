@@ -583,6 +583,65 @@ GPU 전체(당시): 96,462 MiB 사용 / 97,887 MiB / **여유 1,425 MiB(1.4 GiB)
 
 ---
 
+## 14. 선택적 구성 전환 도구 + Continue YAML 버그 발견 (2026-07-11)
+
+### 14.1 배경
+사용자가 선택지 A(구, FP8 2트랙)와 선택지 D(현재, NVFP4+FIM15B)를 **필요에 따라 선택적으로 로드**하고
+싶어해, 안전한 전환 도구를 구축했다. 향후 세 번째 구성이 추가될 가능성까지 고려해 확장 가능한 구조로 설계.
+
+### 14.2 `scripts/switch_model_option.sh` + `env-profiles/`
+- `env-profiles/option-<이름>.env` 파일 하나 = 구성 하나(`LABEL`, `MAIN_MODEL_PATH`, `MAIN_GPU_UTIL`,
+  `MAIN_MAX_LEN`, `AUTOCOMPLETE_MODEL_PATH`, `AUTOCOMPLETE_GPU_UTIL`, `AUTOCOMPLETE_MAX_LEN`,
+  `MAIN_CLIENT_LABEL`, `AUTOCOMPLETE_CLIENT_LABEL`). **새 모델 추가 시 파일만 하나 더 만들면 되고 스크립트
+  수정은 불필요** — 사용자 요청("추후 한가지 모델이 더 추가 될 수 있으니")을 반영한 설계.
+- `./switch_model_option.sh {list|status|<옵션명>}`: 모델 디렉터리 미스테이징 시 서비스 중단 전 사전 검증,
+  **main→autocomplete 순차 기동**(§13.3의 동시기동 간섭 교훈 그대로 내장), 기동 실패 시 로그 출력 후 즉시 중단.
+- 현재 `option-a.env`(구), `option-d.env`(현재 채택) 두 개 등록. `.gitignore`의 `*.env` 규칙이 이 파일들까지
+  막고 있어 `!env-profiles/*.env` 예외 추가(시크릿 없는 파일이라 커밋 대상).
+
+### 14.3 실측 중 발견한 버그: Continue YAML 라벨 파싱 오류 (신규)
+전환 스크립트가 클라이언트 표시 라벨(`opencode.json`, `~/.continue/config.yaml`)도 함께 갱신하도록
+설계했는데, A로 전환 후 **VS Code(Continue)의 모델 드롭다운이 완전히 비어버리는** 문제가 발생했다(완전
+재시작으로도 재현 — 캐시 문제가 아님을 시사).
+
+**근본 원인(확정):** 라벨에 `"선택지 A: FP8"`처럼 **콜론+공백**이 포함됐는데, `~/.continue/config.yaml`에
+따옴표 없이(`name: Main — ... (선택지 A: FP8)`) 기록되면서, YAML 파서가 값 중간의 `": "`를 새 매핑
+시작으로 오인 — **파일 전체 파싱이 깨져** Continue가 모델 목록을 아예 못 읽었다(`opencode.json`은 JSON이라
+이 문제가 없어 정상 동작 — 증상이 Continue에만 국한된 이유).
+
+**2차 발견:** YAML을 고쳐도 여전히 선택 안 됨 → Continue가 "현재 선택된 모델"을 **이름 문자열로 캐싱**하는
+`~/.continue/index/globalContext.json`이 예전 라벨을 그대로 가리키고 있어, 목록엔 있어도 선택 상태가
+깨져 있었음(자세히 보면 드롭다운 목록 자체는 비지 않고 "선택 안 됨" 상태였을 가능성 — 실제로는 YAML
+파싱 실패가 선행 원인이라 목록 자체가 비어보인 것으로 최종 확인).
+
+**조치(스크립트에 영구 반영, `switch_model_option.sh`):**
+1. `~/.continue/config.yaml`의 name 값을 **항상 큰따옴표로 감싸도록** 수정(내부 큰따옴표는 이스케이프).
+2. 전환 시 `~/.continue/index/globalContext.json`의 `selectedModelsByProfileId.local.{chat,edit,apply,autocomplete}`
+   도 함께 갱신하도록 추가.
+- 재현 테스트(D→D 무변경 전환 및 재전환)로 두 수정 모두 정상 동작 확인 — 이후 A↔D 전환에서 라벨·선택
+  상태가 항상 일치함을 확인.
+
+### 14.4 선택지 A 재검증 (StarCoder2-7B FP8, IDE 실사용)
+전환 스크립트로 A로 전환 후 `ide_test_optionA_7b.py`(9개 함수)로 VS Code+Continue 자동완성을 실사용 테스트.
+
+- **전체 파일 `ast.parse()` 문법 오류 없음** — 모든 완성이 문법적으로 완벽.
+- subtract/is_even/square/max_of_three/celsius_to_fahrenheit/factorial/reverse_string 전부 정확.
+- `Point.distance_to` 유클리드 거리 공식도 정확(§13.7에서 15B가 겪었던 `**2` 중복 없이 깨끗 — 이번엔
+  사용자가 `return` 지점에서 적절히 멈춰 §13.7의 "완료 지점 이후 반복 수락" 함정도 재현 안 됨).
+- `fizzbuzz`(docstring만 있던 빈 함수)를 다단계 완성으로 정확히 구현.
+- 모델이 요청하지 않은 `Point.__str__`, `fizzbuzz_list` 두 함수를 자체적으로 추가 생성 — 둘 다 문법·로직
+  정상(FIM 모델이 맥락상 자연스러운 확장을 스스로 제안한 사례).
+- audit_log: 최근 30분 27건 중 stop 1건 + pending 26건(정상, 타이핑 취소) + error 0건.
+
+**결론:** 7B(선택지 A)도 사용자가 "완료 지점에서 멈추기" 요령을 지키면 garbage 없이 정상 동작함을
+재확인 — §13.7의 문제는 모델 크기보다 사용 패턴에 더 크게 좌우됨을 뒷받침하는 추가 증거.
+
+### 14.5 최종 상태
+테스트 완료 후 `./scripts/switch_model_option.sh d`로 운영 채택 구성(선택지 D)에 복귀, E2E 정상 확인.
+GPU 92,838~93,xxx MiB 사용 / 여유 ~4.4GB, 클라이언트 라벨(`opencode.json`/Continue) 전부 "선택지 D"로 일치.
+
+---
+
 ## 부록. 산출물 목록
 
 | 구분 | 산출물 |
@@ -590,7 +649,8 @@ GPU 전체(당시): 96,462 MiB 사용 / 97,887 MiB / **여유 1,425 MiB(1.4 GiB)
 | IaC | `docker-compose.yml`, `.env(.example)` |
 | 게이트웨이 | `litellm/config.yaml`, `litellm/Dockerfile`, `audit_logger.py`, `gemma_compat.py`, `autocomplete_compat.py` |
 | PII | `presidio/recognizers/kr_custom.yaml`, `presidio/README.md` |
-| 운영 스크립트 | `scripts/`: phase0_bootstrap, rotate_keys, backup, restore, stage_model, deploy_model, audit, anomaly_check, poc_quant_compare, poc_fim_compare, poc_concurrency_smoke |
+| 운영 스크립트 | `scripts/`: phase0_bootstrap, rotate_keys, backup, restore, stage_model, deploy_model, audit, anomaly_check, poc_quant_compare, poc_fim_compare, poc_concurrency_smoke, **switch_model_option**(§14, 구성 A/D 안전 전환) |
+| 구성 프로파일 | `env-profiles/`: option-a.env(구), option-d.env(현재 채택) — 확장 가능(§14.2) |
 | 문서 | `REQUIREMENTS.md`, `TEST_PLAN.md`, `CLAUDE.md`, `docs/OPERATOR_GUIDE.md`, `docs/USER_GUIDE.md`, `docs/POC_FP4_QUANT_COMPARISON.md`, 본 보고서 |
 | 클라이언트 | `opencode.json`, `~/.continue/config.yaml` |
 | 스테이징 모델 | Llama 8B(FP8/NVFP4), Gemma 9B/27B(FP8), StarCoder2-7B(FP8), Qwen2.5-Coder-7B(FP8), Mistral-24B(NVFP4) — 검증장비(5090) |
