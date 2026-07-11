@@ -537,6 +537,50 @@ GPU 전체(당시): 96,462 MiB 사용 / 97,887 MiB / **여유 1,425 MiB(1.4 GiB)
 가중치(main)를 FP8→NVFP4로 줄여 확보한 여유를, FIM 모델 크기 상향(7B→15B, §13.4 품질 개선 참조)과 전체
 안전마진 확대(1.4GB→3.5GB)에 나눠 투입한 구조임을 수치로 재확인.
 
+### 13.10 "선택지 C" 재검토 시도: 메인 모델 대안 3종 조사 (2026-07-09~11)
+
+사용자가 "선택지 C"(더 큰/고성능 메인 모델)를 다시 검토하고 싶어해, 후보 3종을 실측·조사했다. 결론적으로
+모두 채택 불가로 판정되어 **선택지 D(§13) 구성이 그대로 유지**된다.
+
+**① Mistral Large 3 (675B) — 즉시 기각(용량):**
+- `mistralai/Mistral-Large-3-675B-Instruct-2512`: 675B 파라미터, Apache 2.0(라이선스는 양호).
+- 공식 NVFP4 양자화본(`mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4`)도 실재하나 **403.2GB** —
+  96GB 단일 카드의 4배 초과. 어떤 양자화로도 단일 카드 배치 불가(`CLAUDE.md`/`OPERATOR_GUIDE.md` §10의
+  "675B(~403GB)는 멀티 GPU 필요 → 정책상 금지" 케이스와 정확히 일치). **다운로드 시도 없이 조사만으로 기각.**
+
+**② NVIDIA Nemotron-Labs-3-Puzzle-75B-A9B-NVFP4 — 아키텍처 리스크로 보류:**
+- 75B 총/9.3B 활성(MoE+Mamba 하이브리드), NVFP4 53.5GB, 라이선스 OpenMDW-1.1(MIT급, 상업적 사용 자유),
+  벤치마크 우수(MMLU-Pro 82.2 등, Llama 3.3-70B 대비 높음).
+- `NemotronHPuzzleForCausalLM`이 vLLM 0.17.1 레지스트리에 등록되어 있으나, NVIDIA 공식 배포 예시가
+  **`tensor-parallel-size 2~4` 권장**(단일 GPU 정책과 충돌), **검증 vLLM 버전이 0.20.0**(우리 고정판 0.17.1보다
+  신규), Mamba 전용 캐시 설정(`mamba_ssm_cache_dtype` 등) 필요, 일부 배포 예시는 `--trust-remote-code` 요구.
+  **다운로드 전 리스크가 명확해 사용자와 협의 후 보류(다운로드 시도 없음).**
+
+**③ Mistral-Small-4-119B-2603-NVFP4 — 다운로드·실기동까지 시도했으나 로드 실패:**
+- 119B 총/6.5B 활성(MoE), NVFP4 실측 66GB, 라이선스 **Apache 2.0**(완전 자유), 아키텍처는 표준
+  `Mistral3ForConditionalGeneration`(Mamba 없음, vLLM 0.17.1에 등록됨), 양자화 주체가 **vLLM팀·Red Hat 직접
+  협업 제작**(신뢰도 최상), 벤치마크상 GPT-OSS 120B 상회. 세 후보 중 가장 유망해 실제 다운로드·기동까지 진행.
+- **다운로드**: 66GB, 약 1시간 45분. `stage_model.sh gate` 통과(무결성·라이선스, `MODEL_LICENSE_NOTICE.txt` 자체 작성).
+- **실기동 시도**: 기존 서비스(main+autocomplete) 일시 중지 후 GPU 전체 반납, `--gpu-memory-utilization 0.85 --max-model-len 16384 --tool-call-parser mistral --enable-auto-tool-choice`로 단독 기동 시도.
+- **실패 원인(확정):**
+  ```
+  ValueError: Unknown version: v15 in tekken.json.
+  Make sure to use a valid version string: ['v1', 'v2', 'v3', 'v7', 'v11', 'v13']
+  ```
+  이 모델은 표준 HF `config.json`이 아니라 Mistral 고유 포맷(`params.json`+`tekken.json`, Tekken 토크나이저
+  **v15**)을 쓰는데, 우리 vLLM 이미지(v0.17.1)에 내장된 `mistral_common`이 **1.9.1**(v13까지만 지원)이라
+  파싱 자체가 실패한다. 모델 카드가 명시한 요구사항(`mistral_common >= 1.11.0`)을 사전에 확인했었고, 실제
+  로드 시도로 그 우려가 정확히 재현됨.
+- **조치**: 실패 즉시 컨테이너 제거, 기존 main→autocomplete 순차 재기동으로 healthy·E2E 정상 복구(다운타임
+  ~10분). 다운로드했던 66GB 모델 디렉터리(`models/mistral-small-4-119b-nvfp4/`)는 **재사용 불가로 삭제**.
+- **재도전 조건(참고용, 즉시 진행 안 함):** `mistral_common`(및 연쇄적으로 `transformers`/`vllm`)을 업그레이드한
+  커스텀 이미지 빌드가 필요 — 이는 현재 검증 완료된 vLLM v0.17.1 이미지를 교체하는 것이라, 이미 검증된 다른
+  모든 모델(Llama NVFP4, StarCoder2 FP8)까지 처음부터 재검증해야 하는 큰 작업이며 `CLAUDE.md` 버전 고정
+  원칙과도 충돌. 별도 의사결정 없이는 진행하지 않는다.
+
+**최종 결론:** 3종 모두 채택 불가(①용량 초과 ②아키텍처/버전 리스크 ③토크나이저 버전 비호환) →
+**운영 구성은 선택지 D(§13, Llama 3.3-70B NVFP4 + StarCoder2-15B FP8)를 그대로 유지한다.**
+
 ---
 
 ## 부록. 산출물 목록
