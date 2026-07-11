@@ -642,6 +642,79 @@ GPU 92,838~93,xxx MiB 사용 / 여유 ~4.4GB, 클라이언트 라벨(`opencode.j
 
 ---
 
+## 15. vLLM 0.20.0 업그레이드 리스크 검증 (2026-07-11)
+
+### 15.1 배경
+운영 스택은 vLLM **v0.17.1**로 고정되어 있다(§4). Mistral-Small-4-119B-NVFP4 시도(§13.9) 당시
+`mistral_common 1.9.1`이 Tekken v15 토크나이저를 지원하지 못해 로드가 실패했고, 이후 검토 중인
+Nemotron-3-Super-120B-A12B-NVFP4(§16, 별도 기록) 등 신규 아키텍처들도 최신 vLLM을 요구할 수 있어,
+**v0.20.0으로 업그레이드했을 때의 리스크를 실측 기반으로 사전 검증**했다.
+
+### 15.2 정적 분석
+- `docker pull vllm/vllm-openai:v0.20.0` 완료(이미지 31.4GB).
+- 드라이버/CUDA: `nvidia-smi` 기준 Driver 595.71.05 / 최대 지원 CUDA 13.2 — 0.20.0의 CUDA 13.0(.2) 요건에
+  여유 있음, 드라이버 재설치 불필요.
+- 이미지 내부 라이브러리 버전 직접 확인(`docker run --entrypoint bash ... python3 -c "..."`):
+  `vllm 0.20.0` / `torch 2.11.0+cu130` / `transformers 5.6.2` / **`mistral_common 1.11.0`**
+  (§13.9 실패의 직접 원인이었던 `>=1.11.0` 요건 충족 — Tekken v15 지원 확인).
+- 양자화 방식 레지스트리(`QUANTIZATION_METHODS`) 확인: 우리 운영 모델이 쓰는 **`compressed-tensors`**
+  (main NVFP4·FIM FP8 둘 다 `config.json`의 `quantization_config`가 `compressed-tensors` 포맷) 정상 등록됨.
+  릴리스 노트의 "Petit NVFP4 removed"는 별도 경로(`petit_nvfp4`)이며 **우리 경로엔 영향 없음** 확인.
+- 모델 아키텍처 레지스트리 확인: `NemotronHForCausalLM`/`NemotronHPuzzleForCausalLM`/
+  `Mistral3ForConditionalGeneration`/`MistralLarge3ForCausalLM` 전부 등록됨 — §16 후보 모델들의
+  아키텍처 자체는 0.20.0에서 지원됨(단, 실제 로드 가능 여부는 개별 검증 필요).
+
+### 15.3 실측 검증 (운영 서비스 일시 중지 후 GPU 반납, 사용자 승인 하에 진행)
+운영 v0.17.1 컨테이너를 순차 중지(`docker compose stop vllm-main vllm-autocomplete`)해 GPU를 반납한 뒤,
+`VLLM_IMAGE=vllm/vllm-openai:v0.20.0`로 **운영과 동일한 `.env` 값**(main NVFP4 util=0.72/len=27648,
+FIM FP8 util=0.20/len=8192)을 그대로 사용해 main → FIM 순차 기동, 각각 실제 추론까지 확인.
+
+**main (Llama 3.3-70B NVFP4):**
+- 가중치 로드 39.89GiB / 5.6초, 헬스체크 정상, `flashinfer.jit` FP4 GEMM 오토튜너 정상 동작(NVFP4
+  CUTLASS/FlashInfer 커널 경로 그대로 활성).
+- `/v1/chat/completions` 일반 응답 정상("1+2+3+4+5?" → "15").
+- **tool calling(`--enable-auto-tool-choice --tool-call-parser llama3_json`) 정상** — `get_weather`
+  함수 호출 테스트에서 올바른 JSON arguments로 `tool_calls` 응답 확인. §8 FR-9(에이전트 도구 호출) 영향 없음.
+- GPU 사용량 71.5GB(96GB 중), 여유 26GB로 정상 범위.
+
+**FIM (StarCoder2-15B FP8):**
+- 가중치 로드 15.43GiB / 1.8초, 헬스체크 정상.
+- `<fim_prefix>...<fim_suffix>...<fim_middle>` 완성 요청에 정확한 보완(`" + b"`) 반환 — FIM 동작 정상.
+- **커널 선택 변화(비파괴적):** 0.17.1은 `CutlassFP8ScaledMMLinearKernel`을 선택했으나 0.20.0은
+  `FlashInferFP8ScaledMMLinearKernel`을 선택(로그 확인) — 둘 다 Blackwell 지원 커널이며 기능·정확도
+  차이 없음, 성능 재측정은 필요 시 별도 진행.
+
+### 15.4 ⚠️ 핵심 발견: CUDA Graph 메모리 프로파일링 기본 활성화로 인한 KV 캐시 예산 축소
+0.20.0부터 "CUDA graph memory profiling is enabled (default since v0.21.0)"이 적용되어(경고 로그에
+정확한 버전 문구로 출력됨), **동일 `--gpu-memory-utilization` 값이 실측상 더 작은 유효 KV 캐시로
+환산**된다. 로그가 직접 정량 수치까지 제시:
+
+| 모델 | util 설정값 | v0.17.1 KV 캐시(실측) | v0.20.0 KV 캐시(실측) | 축소율 | 동일 KV 유지하려면 |
+|------|------------|----------------------|----------------------|--------|---------------------|
+| main (NVFP4) | 0.72 | 26.22 GiB (85,904 tok, 3.11x) | 24.96 GiB (81,792 tok, 2.96x) | **-4.8%** | util → 0.7303 |
+| FIM (FP8) | 0.20 | (0.17.1 기준 미재측정, 참고용) | 1.64 GiB (21,424 tok, 2.61x) | 로그상 0.20→0.1938 환산 | util → 0.2062 |
+
+두 경우 모두 **서비스 기동·헬스체크·추론은 정상**이었고(즉시 장애는 아님), 다만 §13 VRAM 튜닝 시
+힘들게 맞춘 여유 마진(선택지 D 기준 GPU 여유 ~3.5GB)이 업그레이드 시 그대로 재검증 없이는
+동시성 한도(`max concurrency`)가 최대 5% 가량 줄어들 수 있음을 의미한다.
+
+### 15.5 결론 및 권고
+- **호환성: 문제 없음.** 정적 분석·실측 모두에서 우리 운영 스택(compressed-tensors 양자화, NVFP4/FP8
+  두 모델, tool calling, FIM)이 v0.20.0에서 정상 동작함을 확인했다.
+- **즉시 업그레이드는 비권고, 계획적 전환은 Go.** 업그레이드 자체를 막을 결격 사유는 없으나,
+  §15.4의 KV 캐시 축소 때문에 업그레이드 시 **§13와 동일한 절차로 VRAM 재튜닝(동시성 부하 테스트
+  재실행)이 필요**하다 — "그냥 이미지 태그만 바꾸는" 무중단 전환은 위험, 반드시 재검증 후 전환.
+- **부수 효과:** 0.20.0은 `mistral_common 1.11.0`을 번들해 §13.9에서 실패했던 Mistral-Small-4-119B의
+  Tekken v15 이슈를 해소한다 — 향후 "선택지 C" 후보를 재검토한다면 업그레이드가 선행 조건이 된다.
+  Nemotron-H 계열 아키텍처도 레지스트리엔 등록되어 있으나, 실제 로드 가능 여부(가중치 포맷·특수 캐시
+  플래그 등)는 §15의 범위를 벗어나며 별도 실측이 필요하다.
+- **작업 종료 후 조치:** 테스트에 사용한 GPU는 즉시 반납, 운영 컨테이너를 v0.17.1로 원복하고
+  main→FIM 순차 기동 후 LiteLLM 게이트웨이 경유 실제 요청("ping"→"pong")까지 정상 확인,
+  운영 중단 시간은 두 모델 교체 왕복 포함 약 20분(사용자 승인 하 진행, 실사용자 요청 없는 토요일
+  낮 시간대 진행).
+
+---
+
 ## 부록. 산출물 목록
 
 | 구분 | 산출물 |
