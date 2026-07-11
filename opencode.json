@@ -11,8 +11,11 @@
       },
       "models": {
         "main-llama": {
-          "name": "Main — Llama 3.3-70B (FP8)",
-          "limit": { "context": 27648, "output": 4096 }
+          "name": "Main — Llama 3.3-70B (선택지 A: FP8)",
+          "limit": {
+            "context": 27648,
+            "output": 4096
+          }
         }
       }
     }
