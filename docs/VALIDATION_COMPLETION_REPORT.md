@@ -1047,6 +1047,34 @@ KV+오버헤드 세부: main은 순수 KV cache 6.46GiB + 오버헤드 ~5.55GiB,
 2.59GiB + 오버헤드 ~2.18GiB(둘 다 vLLM `Available KV cache memory` 로그 기준, 재기동 시점에 따라
 0.1~0.2GiB 편차 있음 — §18.2의 2.39GiB는 이전 기동 시점 값).
 
+### 18.9 선택지 A/D/E 3자 비교 (2026-07-13 종합)
+
+§13.9(A vs D)에 §17~18(E 실측)을 더해 세 선택지를 한 표로 종합 비교한다. §10 "운영자 선택 가이드"의
+근거 데이터.
+
+| 항목 | 선택지 A(구) | 선택지 D(구) | 선택지 E(현재 기본값) |
+|---|---|---|---|
+| main 모델 | Llama 3.3-70B-Instruct FP8 | Llama 3.3-70B-Instruct NVFP4 | **gpt-oss-120b MXFP4**(다른 아키텍처) |
+| FIM 모델 | StarCoder2-7B FP8 | StarCoder2-15B FP8 | StarCoder2-**7B** FP8 |
+| served-model-name | main-llama | main-llama | **main-gptoss** |
+| main 가중치 | 67.72 GiB | 39.89 GiB (-27.83) | 65.97 GiB |
+| FIM 가중치 | 7.32 GiB | 15.43 GiB (+8.11) | 6.96 GiB |
+| main KV 캐시(27648) | ~8.7~9.0 GiB(근사) | 26.2 GiB(정밀) | 6.46 GiB(정밀) |
+| FIM KV 캐시(8192) | ~2.2 GiB(근사) | 2.14 GiB | 2.39~2.59 GiB |
+| GPU 총사용 | 96,462 MiB | 93,659 MiB | 92,500 MiB |
+| GPU 여유 | 1.4 GiB(매우 타이트) | 3.5 GiB(여유) | **4.6~5.4 GiB(가장 여유)** |
+| main 정밀도 | FP8(손실 거의 없음) | NVFP4(대형 모델 안전, §6 PoC) | MXFP4(네이티브 — SM120 미인식→Marlin 폴백이나 처리량 지장 없음, §17.3) |
+| main 처리량(단일요청) | (미측정) | (미측정) | **185 tok/s**(8B급보다 빠름, MoE 토큰당 5.1B만 활성화) |
+| FIM 품질(garbage 재현) | 정답 뒤 관련없는 텍스트 자주 발생 | 4회 중 3회 자연스럽게 stop, 훨씬 안정적 | A와 동일(7B 재사용, garbage 재현, §17.7/§18.2) |
+| 채팅 품질 PoC(hard-set 7문항) | (미측정) | 6.5/7(§17.8) | **7/7**(단, `max_tokens` 900 이상 필요 — 320 이하는 잘림) |
+| 동시성/부하 테스트 | 24~48건 100%, 30분 소크 6,676건 100% | 100~228건 100%, 30분 소크 6,552건 100% | 168/168+90/90건 100%(§17.6/§18.2) — **30분 소크는 아직 미실시** |
+| .env 핵심값 | `MAIN_GPU_UTIL=0.83`, `MAIN_MAX_LEN=27648`, `AUTOCOMPLETE_GPU_UTIL=0.10` | `MAIN_GPU_UTIL=0.72`, `MAIN_MAX_LEN=27648`, `AUTOCOMPLETE_GPU_UTIL=0.20` | `MAIN_GPU_UTIL=0.80`, `MAIN_MAX_LEN=27648`, `AUTOCOMPLETE_GPU_UTIL=0.11` |
+| 모델 경로 | llama-3.3-70b-instruct-fp8 / starcoder2-7b-fp8 | llama-3.3-70b-instruct-nvfp4 / starcoder2-15b-fp8 | gpt-oss-120b / starcoder2-7b-fp8 |
+
+**잔여 과제:** 선택지 E는 A/D와 달리 30분 지속 부하(soak test) 검증이 아직 없다 — 장시간 운영 시
+드리프트·메모리 누수 여부는 E로 실제 채택 기간이 누적되면서 자연 검증되거나, 별도 soak test로
+선행 확인할 수 있다(§11.10/§13.8 방법론 재사용 가능).
+
 ---
 
 ## 부록. 산출물 목록
