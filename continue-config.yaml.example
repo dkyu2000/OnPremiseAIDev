@@ -1,0 +1,39 @@
+# continue-config.yaml.example
+# → 복사해서 ~/.continue/config.yaml 로 저장 (경로가 정확해야 VS Code Continue 확장이 인식함)
+# 아래 두 자리를 반드시 본인 값으로 교체할 것:
+#   1) apiBase 의 <사내-LiteLLM-서버-주소> → 실제 LiteLLM 게이트웨이 서버 주소(운영팀에 문의)
+#   2) apiKey 의 sk-... → 운영팀에서 발급받은 본인 가상 키(절대 공유/커밋 금지)
+
+name: "On-Prem AI"
+version: 0.0.1
+schema: v1
+model: litellm-onprem/main-gptoss
+models:
+  - name: "Main — gpt-oss-120b (선택지 E: MXFP4)"
+    provider: openai
+    model: main-gptoss
+    apiBase: http://<사내-LiteLLM-서버-주소>:4000/v1
+    apiKey: sk-여기에-본인-가상키-입력
+    roles: [chat, edit, apply]
+  - name: "StarCoder2-7B (선택지 E: FP8)"
+    provider: openai
+    model: autocomplete-starcoder2
+    apiBase: http://<사내-LiteLLM-서버-주소>:4000/v1
+    apiKey: sk-여기에-본인-가상키-입력
+    roles: [autocomplete]
+
+# ── MCP 확장(선택 사항) ──────────────────────────────────────────
+# 폐쇄망에서도 안전한 것만 기본 포함(외부 API 호출 없음). 설치 방법은 docs/USER_GUIDE.md 참조.
+# command 경로는 `which pdf-reader-mcp` 로 확인한 실제 절대경로로 교체할 것
+# (VS Code GUI 프로세스가 셸 PATH를 상속하지 않는 경우가 있어 절대경로 권장).
+#
+# Context7(최신 라이브러리 문서 조회)은 본인 PC가 별도로 인터넷이 되는 경우에만 추가할 것
+# (Context7은 자체 호스팅이 불가능해 요청마다 외부 클라우드 API를 호출함 — USER_GUIDE.md 참조).
+# neon MCP는 사용 금지(우리 스택과 무관한 외부 클라우드 Postgres 전용, CLAUDE.md §2-5 위반).
+mcpServers:
+  - name: pdf-reader
+    type: stdio
+    command: /home/<사용자명>/.local/nodejs/bin/pdf-reader-mcp   # which pdf-reader-mcp 결과로 교체
+    env:
+      MCP_PDF_OCR_COMMAND: tesseract
+      MCP_PDF_OCR_ARGS_JSON: '["{input}", "stdout", "-l", "kor+eng", "tsv"]'

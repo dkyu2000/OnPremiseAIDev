@@ -1130,9 +1130,10 @@ think-time 5~20초, chat(70%, `main-gptoss`, `max_tokens=300`)+FIM(30%, `autocom
 | 게이트웨이 | `litellm/config.yaml`, `litellm/Dockerfile`, `audit_logger.py`, `gemma_compat.py`, `autocomplete_compat.py` |
 | PII | `presidio/recognizers/kr_custom.yaml`, `presidio/README.md` |
 | 운영 스크립트 | `scripts/`: phase0_bootstrap, rotate_keys, backup, restore, stage_model, deploy_model, audit, anomaly_check, poc_quant_compare, poc_fim_compare, poc_concurrency_smoke, **switch_model_option**(§14, 구성 A/D 안전 전환) |
-| 구성 프로파일 | `env-profiles/`: option-a.env(구), option-d.env(현재 채택) — 확장 가능(§14.2) |
+| 구성 프로파일 | `env-profiles/`: option-a.env, option-d.env, option-e.env(기본값) — 셋 다 운영자 상시 선택 가능(§10, §18.7) |
 | 문서 | `REQUIREMENTS.md`, `TEST_PLAN.md`, `CLAUDE.md`, `docs/OPERATOR_GUIDE.md`, `docs/USER_GUIDE.md`, `docs/POC_FP4_QUANT_COMPARISON.md`, 본 보고서 |
-| 클라이언트 | `opencode.json`, `~/.continue/config.yaml` |
+| 클라이언트(실제 사용 중) | `opencode.json`, `~/.continue/config.yaml` |
+| **클라이언트 배포용 템플릿(신규, 시크릿 없음)** | **`opencode.json.example`, `continue-config.yaml.example`** — 사용자 배포용, 서버주소/키만 교체하면 됨 |
 | 스테이징 모델 | Llama 8B(FP8/NVFP4), Gemma 9B/27B(FP8), StarCoder2-7B(FP8), Qwen2.5-Coder-7B(FP8), Mistral-24B(NVFP4) — 검증장비(5090) |
-| 운영 스테이징 모델(구, §11.5) | Llama 3.3-70B-Instruct(FP8, ~68GB) — 운영장비(RTX PRO 6000) |
-| **운영 스테이징 모델(현재 채택, §13)** | **Llama 3.3-70B-Instruct(NVFP4, ~40GB) + StarCoder2-15B(FP8, ~16GB)** — 운영장비(RTX PRO 6000) |
+| 운영 스테이징 모델(구, §11.5~§13) | Llama 3.3-70B-Instruct(FP8 ~68GB, 선택지 A) / NVFP4 ~40GB+StarCoder2-15B(선택지 D) — 운영장비(RTX PRO 6000) |
+| **운영 스테이징 모델(현재 기본값, §17~18)** | **gpt-oss-120b(MXFP4, ~66GB) + StarCoder2-7B(FP8, ~7GB)** — 운영장비(RTX PRO 6000), 선택지 A/D로 언제든 전환 가능 |

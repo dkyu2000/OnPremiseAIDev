@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "litellm-onprem/main-gptoss",
+  "provider": {
+    "litellm-onprem": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "On-Prem LiteLLM (LG CNS WISE)",
+      "options": {
+        "baseURL": "http://<사내-LiteLLM-서버-주소>:4000/v1",
+        "apiKey": "{env:OPENCODE_LITELLM_KEY}"
+      },
+      "models": {
+        "main-gptoss": {
+          "name": "Main — gpt-oss-120b (선택지 E: MXFP4)",
+          "limit": {
+            "context": 27648,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}
