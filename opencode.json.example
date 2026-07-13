@@ -13,7 +13,7 @@
         "main-gptoss": {
           "name": "Main — gpt-oss-120b (선택지 E: MXFP4)",
           "limit": {
-            "context": 27648,
+            "context": 26000,
             "output": 4096
           }
         }
