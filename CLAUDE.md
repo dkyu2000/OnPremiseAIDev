@@ -58,33 +58,40 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
 
 ## 5. 모델 구성 (테스트 장비 전용)
 
-**★[2026-07-13 운영 결정 갱신] 운영 채택 구성 = 2-트랙 고정: `gpt-oss-120b MXFP4`(채팅·에이전트) + `StarCoder2-7B FP8`(FIM 자동완성). served-model-name도 `main-gptoss`로 변경(더 이상 Llama 계열이 아니므로).**
-서브 채팅 모델(Gemma 트랙)은 **앞으로 모든 환경(검증·운영)에서 사용하지 않는다**(2026-07-07 결정, 유지). 이유:
-①단일 채팅 모델로 라우팅을 단순화(운영 복잡도·장애 지점 감소), ②서브를 얹을 만큼 VRAM 여유가 넉넉하지 않음.
-아래 서브/2-트랙-라우팅 항목 및 구 선택지(Llama 계열 A/D)는 **과거 검증 기록**이며, 현재 운영 구성에는
-반영하지 않는다. `scripts/switch_model_option.sh {a|d|e}`로 언제든 재전환 가능(완료보고서 §17 참조).
+**★[2026-07-13 운영 정책 확정] 운영 구성 = 2-트랙 고정(main+autocomplete), 단 main/autocomplete에 실제로
+어떤 모델을 실을지는 운영자가 선택지 A/D/E 중 자유롭게 선택·전환할 수 있다(고정 채택이 아님).
+기본값(초기 기동 시작 구성)은 선택지 E다.** `scripts/switch_model_option.sh {a|d|e}`로 언제든 전환.
+서브 채팅 모델(Gemma 트랙)은 **선택지와 무관하게 앞으로 모든 환경(검증·운영)에서 사용하지 않는다**
+(2026-07-07 결정, 유지). 이유: ①단일 채팅 모델로 라우팅을 단순화(운영 복잡도·장애 지점 감소), ②서브를
+얹을 만큼 VRAM 여유가 넉넉하지 않음. 아래 서브/2-트랙-라우팅 항목은 **과거 검증 기록**이며 반영하지 않는다.
 
-- **채택(운영 고정, 2026-07-13 갱신 — "선택지 E"):** `gpt-oss-120b`(OpenAI, main, 가중치 ~65.97GB, MXFP4 네이티브
-  양자화 — 표준 MoE·128개 전문가 중 4개 활성, Llama 계열이 아닌 별도 아키텍처) +
-  `StarCoder2-7B FP8`(FIM 자동완성, 가중치 ~6.96GB). GPU 총사용 ~92.4GB/96GB(여유 ~5.4GB, max-model-len
-  27648 기준). 채팅/에이전트 품질·속도가 이전 Llama 구성보다 우위(hard-set 품질 PoC 7/7 vs 6.5/7, 처리량
-  8배)로 갱신 채택. LiteLLM(4000)은 `main-gptoss`+`autocomplete-starcoder2` 두 모델만 라우팅한다.
-  ★SM120이 vLLM의 MXFP4 백엔드 선택 로직에 미인식되어 Marlin 커널로 폴백되는 경고가 뜨나(업스트림 버그,
-  `VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1`로도 우회 안 됨) 실사용 처리량(185 tok/s)엔 지장 없음.
-  ★gpt-oss는 harmony 포맷(reasoning/content 분리)이라 Llama보다 완결까지 훨씬 많은 토큰이 필요 —
-  어려운 질문은 `max_tokens` 900 이상 권장(320은 답이 잘리는 사례 실측). ★FIM 7B는 §13에서 확인한
+- **선택지 E(기본값, 2026-07-13 채택) — 아키텍처가 다른 별도 모델:** `gpt-oss-120b`(OpenAI, main, 가중치
+  ~65.97GB, MXFP4 네이티브 양자화 — 표준 MoE·128개 전문가 중 4개 활성, Llama 계열이 아님, served-model-name
+  `main-gptoss`) + `StarCoder2-7B FP8`(FIM 자동완성, 가중치 ~6.96GB). GPU 총사용 ~92.4GB/96GB(여유 ~5.4GB,
+  max-model-len 27648 기준). 채팅/에이전트 품질·속도가 Llama 구성(D)보다 우위(hard-set 품질 PoC 7/7 vs
+  6.5/7, 처리량 8배)로 기본값 채택. LiteLLM(4000)은 `main-gptoss`+`autocomplete-starcoder2` 두 모델만
+  라우팅한다. ★SM120이 vLLM의 MXFP4 백엔드 선택 로직에 미인식되어 Marlin 커널로 폴백되는 경고가 뜨나
+  (업스트림 버그, `VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1`로도 우회 안 됨) 실사용 처리량(185 tok/s)엔
+  지장 없음. ★gpt-oss는 harmony 포맷(reasoning/content 분리)이라 Llama보다 완결까지 훨씬 많은 토큰이
+  필요 — 어려운 질문은 `max_tokens` 900 이상 권장(320은 답이 잘리는 사례 실측). ★FIM 7B는 §13에서 확인한
   EOS 불안정(정답 뒤 garbage 생성) 트레이드오프가 있음(LiteLLM stop 토큰으로 완화, 완전 해결 아님).
-  ★두 vLLM은 반드시 **순차 기동**(main 먼저 실측 확인 후 autocomplete) — 동시 기동 시 서로의 메모리
-  프로파일링이 간섭해 실제보다 훨씬 부족하게 계산되어 기동 실패한다(완료보고서 §13.3).
-- **[구 채택, 2026-07-08~07-13, 현재 미사용, "선택지 D"] Llama NVFP4+FIM 15B:** `Llama 3.3-70B NVFP4`(~40GB) +
-  `StarCoder2-15B FP8`(~15.4GB), GPU 여유 ~3.5GB. gpt-oss 조합으로 대체(완료보고서 §17.8 품질 PoC 근거).
-- **[구 채택, 2026-07-07~08, 현재 미사용, "선택지 A"] Llama FP8+FIM 7B:** `Llama 3.3-70B FP8`(~70GB) + `StarCoder2-7B FP8`(~7GB).
-  합 ~77GB, 여유 ~30MiB로 매우 타이트했음.
+- **선택지 D(운영자 선택 가능, 2026-07-08 최초 채택) — Llama NVFP4+FIM 15B:** `Llama 3.3-70B NVFP4`(~40GB,
+  `NvFp4LinearBackend.FLASHINFER_CUTLASS` 경로 실동작) + `StarCoder2-15B FP8`(~15.4GB), GPU 여유 ~3.5GB.
+  FIM 품질(EOS 안정성)이 E/A의 7B보다 우수 — IDE 자동완성 비중이 높은 사용자에게 권장.
+- **선택지 A(운영자 선택 가능, 2026-07-07 최초 채택) — Llama FP8+FIM 7B:** `Llama 3.3-70B FP8`(~70GB) +
+  `StarCoder2-7B FP8`(~7GB). 합 ~77GB, 여유 ~30MiB로 매우 타이트 — 세 선택지 중 재기동 실패 리스크가
+  가장 높아 특별한 사유 없으면 D/E 권장.
+- **선택지 A/D/E 공통:** 두 vLLM은 반드시 **순차 기동**(main 먼저 실측 확인 후 autocomplete) — 동시 기동
+  시 서로의 메모리 프로파일링이 간섭해 실제보다 훨씬 부족하게 계산되어 기동 실패한다(완료보고서 §13.3).
+  선택지 전환 시 `litellm/config.yaml` 라우트명·클라이언트 설정·발급된 가상 키 allowlist까지 함께
+  갱신해야 하는 경우가 있음(A↔D는 불필요, →E 전환처럼 아키텍처 자체가 바뀔 때만) — `switch_model_option.sh`가
+  전부 자동 처리(완료보고서 §18).
 - **[역사적 검증 기록, 미채택] 운영 서브 모델 실검증:** `Gemma 2-27B (FP8, ~27GB)` 단일 — Phase C에서 실측 통과했으나 운영 미채택.
 - **[역사적 검증 기록, 미채택] 2-트랙 라우팅 패턴 검증:** `Llama 3.1-8B-Instruct (FP8, ~8GB)` [메인 프록시] + `Gemma 2-9B-it (FP8, ~9GB)` [서브]
   — Phase B에서 vLLM 인스턴스 2개(포트 8000/8001) 동시상주·라우팅 분기를 실측 통과했으나 운영 미채택.
 - **IDE tab 자동완성(FIM) 검증:** `StarCoder2-7B/15B (FP8)` [autocomplete] — Llama/Gemma(instruct)는 FIM 미지원이라
-  inline 자동완성 불가 → FIM 전용 코드 모델 별도. phase-ide 프로파일(main+autocomplete)로 검증(포트 8003), phase-prod로 운영 채택(현재 15B).
+  inline 자동완성 불가 → FIM 전용 코드 모델 별도. phase-ide 프로파일(main+autocomplete)로 검증(포트 8003).
+  선택지별로 7B(A/E) 또는 15B(D) 중 운영자가 선택.
 - 중국계 모델(Qwen/DeepSeek 등)은 **보안 정책상 사용 금지** (제안서 기준) — 자동완성 모델도 비중국계(StarCoder2/CodeLlama)로 한정.
 
 ## 6. 🚫 금지 사항 (Never Do)
