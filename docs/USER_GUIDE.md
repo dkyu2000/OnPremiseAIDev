@@ -190,6 +190,21 @@ which pdf-reader-mcp
 건 별개 문제다** — 현재 운영 메인 모델(`gpt-oss-120b`)은 텍스트 전용(비전 미지원)이라, OCR로 뽑아낸
 **텍스트**는 읽을 수 있어도 이미지 자체의 시각적 의미는 해석할 수 없다(비전 지원 모델 도입 시 별도 검토 필요).
 
+**VS Code(Continue)에서 쓰려면** `~/.continue/config.yaml`에 별도 형식으로 추가(OpenCode와 설정 파일
+형식이 다름 — Continue는 `mcpServers` 최상위 키 사용). GUI 프로세스는 셸 PATH(`.bashrc`)를 상속하지
+않을 수 있어 **절대경로**로 지정할 것(`which pdf-reader-mcp`로 확인한 경로):
+```yaml
+mcpServers:
+  - name: pdf-reader
+    type: stdio
+    command: /home/<사용자>/.local/nodejs/bin/pdf-reader-mcp   # which pdf-reader-mcp 결과로 교체
+    env:
+      MCP_PDF_OCR_COMMAND: tesseract
+      MCP_PDF_OCR_ARGS_JSON: '["{input}", "stdout", "-l", "kor+eng", "tsv"]'
+```
+설정 후 VS Code 재시작 필요. 실사용 검증 완료(2026-07-13, Continue 채팅에서 "pdf-reader 도구로 ~ 읽어줘"
+요청 시 정상 동작).
+
 > ⚠ **`neon` MCP는 사용하지 마세요.** Neon사의 클라우드 Postgres 전용 관리 도구로, 우리는 자체
 > 호스팅 PostgreSQL을 쓰므로 애초에 해당 사항이 없습니다(CLAUDE.md §2-5 외부 클라우드 컴포넌트 금지).
 
