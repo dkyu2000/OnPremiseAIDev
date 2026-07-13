@@ -73,7 +73,8 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
   라우팅한다. ★SM120이 vLLM의 MXFP4 백엔드 선택 로직에 미인식되어 Marlin 커널로 폴백되는 경고가 뜨나
   (업스트림 버그, `VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1`로도 우회 안 됨) 실사용 처리량(185 tok/s)엔
   지장 없음. ★gpt-oss는 harmony 포맷(reasoning/content 분리)이라 Llama보다 완결까지 훨씬 많은 토큰이
-  필요 — 어려운 질문은 `max_tokens` 900 이상 권장(320은 답이 잘리는 사례 실측). ★FIM 7B는 §13에서 확인한
+  필요 — **`max_tokens`는 항상 900 이상으로 설정**(어려운 질문뿐 아니라 간단한 질문도 300 이하에서
+  잘리는 사례가 30분 소크 테스트로 실측됨, 완료보고서 §18.11). ★FIM 7B는 §13에서 확인한
   EOS 불안정(정답 뒤 garbage 생성) 트레이드오프가 있음(LiteLLM stop 토큰으로 완화, 완전 해결 아님).
 - **선택지 D(운영자 선택 가능, 2026-07-08 최초 채택) — Llama NVFP4+FIM 15B:** `Llama 3.3-70B NVFP4`(~40GB,
   `NvFp4LinearBackend.FLASHINFER_CUTLASS` 경로 실동작) + `StarCoder2-15B FP8`(~15.4GB), GPU 여유 ~3.5GB.

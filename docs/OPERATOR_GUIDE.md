@@ -343,11 +343,15 @@ SM120)와 Mistral-Small-4-119B(MLA, SM120에서 vLLM/SGLang 전 백엔드 실패
   Marlin kernel` 경고가 항상 뜬다(`VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1`로도 우회 안 됨 — vLLM이 SM120을
   인식 못 해 발생하는 별개 버그). 실사용 처리량은 185 tok/s로 지장 없음(8B급보다 빠름 — MoE 특성상 토큰당
   5.1B만 활성화).
-- **harmony 포맷(중요 — 운영 시 주의):** gpt-oss는 reasoning(사고과정)과 content(최종답)를 분리 응답한다.
-  어려운 질문은 완결까지 Llama보다 훨씬 많은 토큰이 필요 — `max_tokens`가 작으면(실측: 320 이하) `finish_reason:
-  "length"`로 잘려 **content가 null로 반환**될 수 있다. 최소 600~900 이상을 권장(실측: 900에서 900자 이내로
-  안정적으로 완결). OpenCode/Continue 클라이언트는 자체 기본값이 이보다 넉넉해 정상 동작 확인됨(`opencode.json`의
-  `limit.output: 4096`으로 이미 충분).
+- **★harmony 포맷(필수 권고 — 운영 시 반드시 확인):** gpt-oss는 reasoning(사고과정)과 content(최종답)를
+  분리 응답한다. `max_tokens`가 작으면 `finish_reason: "length"`로 잘려 **content가 null로 반환**될
+  수 있다 — **어려운 질문뿐 아니라 "리스트 길이 구하는 함수?"처럼 간단해 보이는 질문도 위험군**임이
+  30분 소크 테스트에서 실측 확인됐다(`max_tokens=300`에서 프롬프트 9종 중 2종이 매번 잘림, 전체
+  트래픽의 11.1%가 실패 — 완료보고서 §18.11). **클라이언트 `max_tokens` 기본값을 최소 900 이상으로
+  설정할 것**(실측: 900에서 안정적으로 완결, §18.2에서 동일 조건 90/90 100% 성공 재확인). OpenCode/
+  Continue 클라이언트는 자체 기본값이 이보다 넉넉해 정상 동작 확인됨(`opencode.json`의 `limit.output:
+  4096`으로 이미 충분) — 문제는 **직접 API를 호출하는 자체 스크립트/자동화**에서 작은 `max_tokens`를
+  하드코딩했을 때 발생한다.
 - **FIM 7B 트레이드오프:** §13에서 확인한 StarCoder2-7B의 EOS 불안정(정답 뒤 관련없는 텍스트 생성)이 재현됨.
   LiteLLM stop 토큰 설정(`litellm/config.yaml`)으로 완화되나 완전히 해결되지는 않는다. IDE 자동완성을 많이
   쓰는 사용자는 이 트레이드오프를 감안할 것.
