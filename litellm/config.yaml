@@ -18,9 +18,9 @@
 # ──────────────────────────────────────────────────────────────────────────
 model_list:
   # 메인 — Llama 3.3-70B-Instruct FP8 (운영 채택, phase-prod). MAIN_MODEL_PATH로 검증(8B)/운영(70B) 전환.
-  - model_name: main-llama
+  - model_name: main-gptoss
     litellm_params:
-      model: openai/main-llama
+      model: openai/main-gptoss
       api_base: http://vllm-main:8000/v1
       api_key: "dummy"            # vLLM은 키 불필요(형식상 값)
     model_info:
@@ -136,5 +136,6 @@ general_settings:
 #   프롬프트/응답을 받아 audit_log 테이블에 보강 적재하므로 5필드 자체는 충족된다.
 # - KR_RRN/DB_SECRET 는 Presidio 표준 엔티티가 아니다 → presidio-analyzer 에 custom recognizer
 #   (presidio/recognizers/kr_custom.yaml)를 반드시 로드해야 인식된다. 미반영 시 두 엔티티는 무시됨.
-# - 운영(phase-prod)은 main-llama + autocomplete-starcoder2 두 백엔드만 상시 기동한다.
+# - 운영(phase-prod)은 main-gptoss + autocomplete-starcoder2 두 백엔드만 상시 기동한다(★2026-07-13
+#   선택지 E 전환, served-model-name도 main-llama→main-gptoss로 변경됨 — 완료보고서 §18).
 #   sub-gemma/prod-gemma27b는 model_list에서 제외했으므로 호출 시 "model not found" 오류가 정상이다.

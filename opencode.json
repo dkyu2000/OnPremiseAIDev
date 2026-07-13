@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "litellm-onprem/main-llama",
+  "model": "litellm-onprem/main-gptoss",
   "provider": {
     "litellm-onprem": {
       "npm": "@ai-sdk/openai-compatible",
@@ -10,8 +10,8 @@
         "apiKey": "{env:OPENCODE_LITELLM_KEY}"
       },
       "models": {
-        "main-llama": {
-          "name": "Main — Llama 3.3-70B (선택지 D: NVFP4)",
+        "main-gptoss": {
+          "name": "Main — gpt-oss-120b (선택지 E: MXFP4)",
           "limit": {
             "context": 27648,
             "output": 4096

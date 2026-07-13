@@ -945,6 +945,82 @@ gpt-oss 조합 전환이 더 유리할 수 있음 — 운영 채택 시 `max_tok
 
 ---
 
+## 18. 선택지 E 운영 전환: gpt-oss-120b + StarCoder2-7B (2026-07-13)
+
+### 18.1 배경 및 결정
+§17.8 품질 PoC 결과를 근거로 사용자가 선택지 D→E(gpt-oss-120b+FIM 7B) 전환을 확정 결정했다. §17까지의
+검증은 전부 `max-model-len=8192`(빠른 스모크 테스트용)로 진행됐는데, 실제 채택 전 사용자가 "운영 D와
+동일한 컨텍스트(27648)로 맞춰서 재튜닝"을 요청 — VRAM 재튜닝부터 다시 진행했다.
+
+### 18.2 컨텍스트 27648 기준 VRAM 재튜닝
+- **main(gpt-oss)**: util=0.80으로 **1차 시도 성공**. 가중치 65.97GiB + KV 6.46GiB(94,064토큰,
+  동시성 5.23x) — 8192 기준(1.71GiB)보다 오히려 KV가 커짐(util 상향 효과).
+- **FIM(StarCoder2-7B)**: util=0.15 첫 시도로 성공했으나(KV 6.19GiB, 여유 겨우 1.6GiB) 마진이
+  D보다 타이트해 **util=0.11로 재조정**(KV 2.39GiB) → **최종 여유 5,491MiB(5.4GiB)**, D(3.5~4.5GiB)와
+  동등하거나 더 안전.
+- 실사용 시나리오 부하테스트(`max_tokens=900`, 15×3라운드, chat+FIM 혼합 90건): **90/90 성공(100%)**,
+  chat p50 14.66s(평균 820토큰 생성 — 900 예산의 대부분 사용, harmony 포맷 특성 재확인), FIM p50 0.30s.
+  VRAM 부하 중 무변동(92,396MiB 고정) 재확인, 온도 71°C 정상.
+
+### 18.3 인프라 파라미터화 (A↔D와 다른 신규 작업)
+A↔D는 둘 다 Llama라 `docker-compose.yml`의 `--tool-call-parser llama3_json`이 고정값이어도 문제없었지만,
+E는 다른 아키텍처라 다음을 새로 파라미터화해야 했다:
+- `docker-compose.yml`: `--served-model-name`, `--tool-call-parser`를 env var화, `--reasoning-parser`
+  등 모델별 추가 플래그를 담을 `MAIN_EXTRA_ARGS`, gpt-oss 전용 `VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8`을
+  `MAIN_MXFP4_FLASHINFER`로 env화.
+- `env-profiles/option-e.env` 신규 생성(`MAIN_SERVED_NAME=main-gptoss`, `MAIN_TOOL_PARSER=openai`,
+  `MAIN_EXTRA_ARGS=--reasoning-parser openai_gptoss`, `MAIN_MXFP4_FLASHINFER=1` 등).
+- `scripts/switch_model_option.sh` 대폭 확장: (a) 선택 키 6종 기본값 자동 리셋(`OPTIONAL_DEFAULTS`),
+  (b) `sync_litellm_main_route()` — `litellm/config.yaml`의 메인 라우트(`model_name`/`litellm_params.model`)를
+  새 served-name으로 sed 치환 후 litellm 재기동(설정이 `:ro` 마운트라 핫리로드 안 됨),
+  (c) `update_client_config()` — `opencode.json`의 모델 **키**(라벨뿐 아니라)와 `~/.continue/config.yaml`의
+  `model:` 필드까지 jq/python으로 old→new 치환(기존 `update_client_labels()`는 라벨만 바꿨음 — 이번엔
+  키 자체가 바뀌어야 해서 재작성).
+- `scripts/rotate_keys.sh`: 하드코딩된 `main-llama`를 `.env`의 `MAIN_SERVED_NAME`을 읽어오도록 변경(향후
+  키 발급이 항상 현재 활성 모델과 일치하도록).
+
+### 18.4 실측 중 발견·수정한 버그 4건
+전환을 실제로 실행하며 아래 4개 버그를 실측으로 발견하고 즉시 수정했다(전부 스크립트에 영구 반영):
+
+1. **`load_profile()`의 정규식이 숫자를 포함한 키를 통째로 누락**: `^([A-Z_]+)=(.*)$`가 `[A-Z_]`만 허용해
+   `MAIN_MXFP4_FLASHINFER`처럼 숫자가 들어간 키를 조용히 건너뜀(에러 없이 스킵) — 그 결과 `MAIN_MXFP4_FLASHINFER=1`이
+   프로파일에 명시돼 있었음에도 `.env`엔 기본값 `0`이 기록됨. `[A-Z0-9_]+`로 수정. (실제 서비스 동작에는
+   영향 없었음 — 이 env var 자체가 SM120 미인식 버그를 우회 못 해 어차피 Marlin 폴백이 그대로였음, §18.5 참조.)
+2. **`rotate_keys.sh`의 sed 치환 실수로 JSON에 잘못된 작은따옴표 삽입**: `\"'"$MAIN_SERVED_NAME"'\"` 형태로
+   잘못 작성되어 `{"models":["'main-llama'",...]}`처럼 깨진 JSON이 생성됨. `\"$MAIN_SERVED_NAME\"`로 수정
+   후 `DRY_RUN=1`로 재검증(기본값·오버라이드 값 둘 다 정상 JSON 확인).
+3. **`~/.continue/config.yaml`의 최상위 `model:` 필드 누락**: 파이썬 패처가 `"- name:" `블록 안의 `model:`만
+   치환하도록 작성돼, 블록 밖(파일 4번째 줄)의 최상위 기본 모델 지정(`model: litellm-onprem/main-llama`)이
+   갱신 안 됨 — Continue가 여전히 구 모델을 기본으로 가리키는 상태로 남을 뻔했다(§14의 라벨 버그와는 다른
+   신규 버그). 블록 밖 최상위 `model:` 라인을 별도로 먼저 처리하도록 로직 추가, 재현 테스트로 검증.
+4. **★가장 중요: 기존 발급된 가상 키의 allowlist가 자동으로 안 바뀜.** served-name이 바뀌면 LiteLLM
+   게이트웨이 라우트는 갱신되지만, **키별로 저장된 허용 모델 목록은 별도**라 기존 키가 전부
+   `"key not allowed to access model. ... Tried to access main-gptoss"`로 막힘 — 실측 확인(OpenCode 실행
+   시 발견). `/key/list`가 주는 **해시 토큰만으로 `/key/info`·`/key/update`가 그대로 동작**함을 확인해(평문
+   키 불필요) `sync_key_allowlists()`를 신규 구현, `switch_to()`에 자동 편입. ★추가로 `/key/update`로 DB를
+   갱신해도 LiteLLM의 인메모리 캐시 때문에 **즉시 반영 안 됨**(재현: 갱신 직후에도 구 allowlist로 거부) —
+   키 갱신 발생 시 자동으로 LiteLLM을 재기동해 캐시를 비우도록 설계.
+
+### 18.5 최종 검증
+- `docker compose ps`: 전 서비스 healthy. GPU 92,401~92,506MiB/97,887MiB(여유 ~5.4GB) 유지.
+- `MAIN_MXFP4_FLASHINFER` 버그 수정 후 vllm-main 재기동해 재확인 — **Marlin 폴백은 이 env var와
+  무관하게 동일**(vLLM의 SM120 인식 자체가 안 되는 별개 업스트림 버그, §17.3 참조), KV 6.46GiB로 동일.
+- LiteLLM 경유 실제 요청(`main-gptoss`, `autocomplete-starcoder2`) 정상, `main-gptoss`에 `max_tokens=10`
+  요청 시 `finish_reason: "length"`+`content: null`(harmony 포맷 특성, §17.8에서 예견한 그대로 재현) →
+  `max_tokens=900`으로는 정상 완결 확인.
+- **OpenCode 실사용 검증**: `opencode run`으로 한국어 함정 추론 문제(닭·토끼 머리다리 문제)를 별도
+  `max_tokens` 지정 없이 질의 → 완전하고 정확한 풀이 반환(클라이언트 기본 설정만으로 충분, §18.4 버그
+  4건 수정 후 정상 동작).
+- `~/.continue/config.yaml` 최상위 `model:` 필드까지 정상 확인(수동 보정 + 스크립트 버그 수정 동시 반영).
+
+### 18.6 최종 결론
+**선택지 E(gpt-oss-120b + StarCoder2-7B FP8) 운영 전환 완료.** CLAUDE.md §5, `docs/OPERATOR_GUIDE.md`
+§10, `docs/USER_GUIDE.md`에 반영 완료. `scripts/switch_model_option.sh {a|d|e}`로 세 구성 중 언제든
+재전환 가능하며, 이번에 발견·수정한 4개 버그로 인해 향후 "완전히 다른 아키텍처로 전환"하는 케이스도
+안전하게 자동화됨(같은 계열 내 스왑은 기존과 동일하게 동작, 회귀 없음).
+
+---
+
 ## 부록. 산출물 목록
 
 | 구분 | 산출물 |

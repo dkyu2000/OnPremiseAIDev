@@ -28,15 +28,23 @@
 set -euo pipefail
 
 LITELLM_BASE="${LITELLM_BASE:-http://localhost:4000}"
+ENV_FILE="${ENV_FILE:-$(dirname "$0")/../.env}"
 
 # 마스터 키 로드 (.env 우선, 환경변수 override 가능)
 if [[ -z "${LITELLM_MASTER_KEY:-}" ]]; then
-  ENV_FILE="${ENV_FILE:-$(dirname "$0")/../.env}"
   if [[ -f "$ENV_FILE" ]]; then
     LITELLM_MASTER_KEY="$(grep -E '^LITELLM_MASTER_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
   fi
 fi
 : "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY 가 필요합니다 (.env 또는 환경변수)}"
+
+# ★현재 활성 main 모델의 served-name을 .env에서 읽는다(switch_model_option.sh가 갱신).
+#   선택지 A/D=main-llama, 선택지 E(gpt-oss)=main-gptoss 처럼 구성마다 다르므로 하드코딩 금지.
+MAIN_SERVED_NAME="${MAIN_SERVED_NAME:-}"
+if [[ -z "$MAIN_SERVED_NAME" && -f "$ENV_FILE" ]]; then
+  MAIN_SERVED_NAME="$(grep -E '^MAIN_SERVED_NAME=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+fi
+MAIN_SERVED_NAME="${MAIN_SERVED_NAME:-main-llama}"
 
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -49,14 +57,14 @@ role_payload() {
   case "$role" in
     admin)
       # 무제한: rpm/tpm 미설정. main + 자동완성.
-      echo "{\"models\":[\"main-llama\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"admin-${user_id:-shared}-$(date +%Y%m%d)\",\"metadata\":$meta}"
+      echo "{\"models\":[\"$MAIN_SERVED_NAME\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"admin-${user_id:-shared}-$(date +%Y%m%d)\",\"metadata\":$meta}"
       ;;
     senior)
-      echo "{\"rpm_limit\":120,\"tpm_limit\":200000,\"models\":[\"main-llama\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"senior-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
+      echo "{\"rpm_limit\":120,\"tpm_limit\":200000,\"models\":[\"$MAIN_SERVED_NAME\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"senior-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
       ;;
     developer)
       # ★autocomplete-starcoder2 포함: IDE tab 자동완성(FIM)은 모든 개발자가 사용
-      echo "{\"rpm_limit\":60,\"tpm_limit\":100000,\"models\":[\"main-llama\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"dev-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
+      echo "{\"rpm_limit\":60,\"tpm_limit\":100000,\"models\":[\"$MAIN_SERVED_NAME\",\"autocomplete-starcoder2\"],\"duration\":\"90d\",\"key_alias\":\"dev-${user_id:-x}-$(date +%Y%m%d)\",\"metadata\":$meta}"
       ;;
     *) echo "알 수 없는 역할: $role (admin|senior|developer)" >&2; return 2 ;;
   esac

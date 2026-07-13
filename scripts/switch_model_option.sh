@@ -20,7 +20,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$ROOT/.env"
 PROFILE_DIR="$ROOT/env-profiles"
+LITELLM_CONFIG="$ROOT/litellm/config.yaml"
 REQUIRED_KEYS=(MAIN_MODEL_PATH MAIN_GPU_UTIL MAIN_MAX_LEN AUTOCOMPLETE_MODEL_PATH AUTOCOMPLETE_GPU_UTIL AUTOCOMPLETE_MAX_LEN)
+# 선택 키: 프로파일에 없으면 Llama 계열 기본값으로 리셋(전환 후 .env에 이전 구성 값이 안 남도록).
+# main이 Llama가 아닌 아키텍처(예: gpt-oss)로 바뀔 때만 프로파일에 명시한다.
+declare -A OPTIONAL_DEFAULTS=(
+  [MAIN_SERVED_NAME]=main-llama
+  [MAIN_TOOL_PARSER]=llama3_json
+  [MAIN_EXTRA_ARGS]=""
+  [MAIN_MXFP4_FLASHINFER]=0
+)
 
 log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m✔ %s\033[0m\n' "$*"; }
@@ -39,7 +48,7 @@ load_profile() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-    if [[ "$line" =~ ^([A-Z_]+)=(.*)$ ]]; then
+    if [[ "$line" =~ ^([A-Z0-9_]+)=(.*)$ ]]; then
       key="${BASH_REMATCH[1]}"
       val="${BASH_REMATCH[2]}"
       val="${val%\"}"; val="${val#\"}"   # 양끝 큰따옴표 제거(LABEL="..." 대응)
@@ -100,58 +109,187 @@ wait_healthy() {
   return 1
 }
 
-# ── 클라이언트 설정(opencode.json, ~/.continue/config.yaml)의 표시 라벨을 갱신 ──
-# 서빙명(main-llama/autocomplete-starcoder2)은 안 바뀌므로 기능상 필수는 아니지만,
-# 라벨이 실제 로드된 모델과 달라 혼동을 주는 것을 방지한다(실측: 사용자가 "모델이 안
-# 보인다"고 오인한 사례 — 실제로는 라벨만 구 버전이었음).
-update_client_labels() {
+# ── LiteLLM 메인 라우트(model_name/litellm_params.model)를 새 served-name으로 동기화 ──
+# main이 다른 아키텍처로 바뀌어 served-name 자체가 바뀔 때만 실제로 값이 달라진다(같은 계열
+# 내 스왑이면 old==new라 무변경). 파일을 바꾼 뒤 litellm 컨테이너를 재기동해야 반영된다
+# (config.yaml은 :ro 마운트이며 LiteLLM이 기동 시 1회만 읽음 — 핫리로드 안 됨).
+sync_litellm_main_route() {
+  local old_name="$1" new_name="$2"
+  [[ "$old_name" == "$new_name" ]] && { ok "LiteLLM 메인 라우트명 변경 없음($new_name 유지)"; return 0; }
+  [[ -f "$LITELLM_CONFIG" ]] || { warn "litellm/config.yaml 없음 — 스킵"; return 0; }
+
+  log "litellm/config.yaml 메인 라우트 갱신: $old_name → $new_name"
+  # "- model_name: <old>" 블록 안의 model_name과 litellm_params.model(openai/<old>)만 치환.
+  # 다른 라우트(autocomplete-*)는 건드리지 않도록 정확한 토큰 경계로 매칭.
+  sed -i \
+    -e "s|^\(\s*-\s*model_name:\s*\)${old_name}\s*$|\1${new_name}|" \
+    -e "s|^\(\s*model:\s*openai/\)${old_name}\s*$|\1${new_name}|" \
+    "$LITELLM_CONFIG"
+
+  if grep -q "model_name: ${new_name}" "$LITELLM_CONFIG" && grep -q "model: openai/${new_name}" "$LITELLM_CONFIG"; then
+    ok "litellm/config.yaml 갱신 확인됨"
+  else
+    err "litellm/config.yaml에서 $new_name 을 찾지 못함 — 수동 확인 필요(파일 형식이 예상과 다를 수 있음)"
+    return 1
+  fi
+
+  log "LiteLLM 재기동(설정 반영, :ro 마운트라 핫리로드 안 됨)"
+  DC up -d --force-recreate litellm
+  for i in $(seq 1 20); do
+    sleep 5
+    local status; status="$(docker inspect --format='{{.State.Health.Status}}' litellm 2>/dev/null || echo '?')"
+    echo "  [$i] litellm status=$status"
+    [[ "$status" == "healthy" ]] && { ok "litellm healthy"; return 0; }
+  done
+  err "litellm 헬스체크 타임아웃 — docker logs litellm 로 확인하세요"
+  return 1
+}
+
+# ── 발급된 모든 가상 키의 allowlist(키별 저장된 모델 목록)를 새 served-name으로 동기화 ──
+# LiteLLM은 각 키에 허용 모델 목록을 별도로 저장한다 — served-name이 바뀌어도 키의 allowlist는
+# 자동으로 안 바뀌어서, 기존에 발급된 모든 키가 "key not allowed to access model"로 막히는 문제가
+# 실측 확인됨(완료보고서 §17). /key/list가 주는 해시 토큰만으로 /key/info·/key/update가 되므로
+# 평문 키 없이도 전부 자동 처리 가능.
+sync_key_allowlists() {
+  local old_name="$1" new_name="$2"
+  [[ "$old_name" == "$new_name" ]] && return 0
+  local master_key
+  master_key="$(grep -E '^LITELLM_MASTER_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  [[ -n "$master_key" ]] || { warn "LITELLM_MASTER_KEY 없음 — 키 allowlist 갱신 스킵"; return 0; }
+
+  log "발급된 가상 키 allowlist 동기화: $old_name → $new_name"
+  local tokens
+  tokens="$(curl -s "http://localhost:4000/key/list" -H "Authorization: Bearer $master_key" \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); print('\n'.join(d.get('keys') or []))" 2>/dev/null || true)"
+  if [[ -z "$tokens" ]]; then
+    warn "발급된 키 없음 — 스킵"
+    return 0
+  fi
+
+  local updated=0 skipped=0 failed=0
+  while IFS= read -r token; do
+    [[ -n "$token" ]] || continue
+    local info has_old
+    info="$(curl -s "http://localhost:4000/key/info?key=$token" -H "Authorization: Bearer $master_key" 2>/dev/null || true)"
+    has_old="$(python3 -c "
+import json,sys
+try:
+    d=json.loads('''$info''')
+    info=d.get('info', d)
+    print('1' if '$old_name' in (info.get('models') or []) else '0')
+except Exception:
+    print('0')
+" 2>/dev/null || echo 0)"
+    if [[ "$has_old" == "1" ]]; then
+      if curl -sf -X POST "http://localhost:4000/key/update" -H "Authorization: Bearer $master_key" \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"${token}\",\"models\":[\"${new_name}\",\"autocomplete-starcoder2\"]}" >/dev/null 2>&1; then
+        updated=$((updated+1))
+      else
+        failed=$((failed+1))
+      fi
+    else
+      skipped=$((skipped+1))
+    fi
+  done <<< "$tokens"
+
+  if [[ "$failed" -gt 0 ]]; then
+    err "키 allowlist 갱신 실패 ${failed}건 발생 — 수동 확인 필요(갱신 ${updated}건, 해당없음 ${skipped}건)"
+  else
+    ok "키 allowlist 동기화 완료: 갱신 ${updated}건, 해당없음(이미 최신/다른 모델) ${skipped}건"
+  fi
+
+  if [[ "$updated" -gt 0 ]]; then
+    # ★LiteLLM이 키 정보를 인메모리 캐시하므로, DB 갱신만으론 실제 요청에 즉시 반영 안 됨
+    #   (실측: /key/update 직후에도 구 allowlist로 거부됨). 재기동으로 캐시를 확실히 비운다.
+    log "LiteLLM 재기동(키 캐시 무효화)"
+    DC restart litellm
+    for i in $(seq 1 15); do
+      sleep 5
+      local status; status="$(docker inspect --format='{{.State.Health.Status}}' litellm 2>/dev/null || echo '?')"
+      echo "  [$i] litellm status=$status"
+      [[ "$status" == "healthy" ]] && { ok "litellm healthy"; return 0; }
+    done
+    warn "litellm 재기동 헬스체크 타임아웃 — 수동 확인 필요"
+  fi
+}
+
+# ── 클라이언트 설정(opencode.json, ~/.continue/config.yaml)의 모델 키 + 표시 라벨을 갱신 ──
+# served-name이 바뀌면(예: main-llama→main-gptoss) 클라이언트가 요청하는 model 필드 자체를
+# 새 이름으로 바꿔야 실제로 연결된다(라벨만 바꾸면 예쁘게 보일 뿐 요청은 여전히 구 이름으로
+# 나가 404가 남 — 실측 확인). 같은 계열 내 스왑(old==new)이면 키는 그대로 두고 라벨만 갱신.
+update_client_config() {
+  local old_main="$1" new_main="$2"
   local main_label="${PROFILE[MAIN_CLIENT_LABEL]:-}"
   local ac_label="${PROFILE[AUTOCOMPLETE_CLIENT_LABEL]:-}"
 
-  if [[ -n "$main_label" && -f "$ROOT/opencode.json" ]] && command -v jq >/dev/null 2>&1; then
-    log "opencode.json 라벨 갱신"
+  if [[ -f "$ROOT/opencode.json" ]] && command -v jq >/dev/null 2>&1; then
+    log "opencode.json 갱신"
     local tmp; tmp="$(mktemp)"
-    jq --arg n "$main_label" '.provider["litellm-onprem"].models["main-llama"].name = $n' \
-      "$ROOT/opencode.json" > "$tmp" && mv "$tmp" "$ROOT/opencode.json"
-    ok "opencode.json: main-llama → \"$main_label\""
+    jq --arg old "$old_main" --arg new "$new_main" --arg label "$main_label" '
+      .model = (.model | sub("/" + $old + "$"; "/" + $new)) |
+      .provider["litellm-onprem"].models[$new] = (
+        (.provider["litellm-onprem"].models[$old] // {}) + (if $label != "" then {name: $label} else {} end)
+      ) |
+      if $old != $new then .provider["litellm-onprem"].models |= del(.[$old]) else . end
+    ' "$ROOT/opencode.json" > "$tmp" && mv "$tmp" "$ROOT/opencode.json"
+    ok "opencode.json: $old_main → $new_main${main_label:+ (\"$main_label\")}"
   fi
 
   local continue_cfg="$HOME/.continue/config.yaml"
   if [[ -f "$continue_cfg" ]] && command -v python3 >/dev/null 2>&1; then
-    log "~/.continue/config.yaml 라벨 갱신(best-effort)"
-    # 각 "- name: ..." 블록 안에서 "model: <서빙명>" 이 나오면, 그 블록의 name 을 교체.
+    log "~/.continue/config.yaml 갱신(best-effort)"
+    # 각 "- name: ..." 블록 안에서 "model: <old_served_name>" 을 찾아 model 값과 name(라벨)을 함께 교체.
     # 블록 사이 줄 수에 의존하지 않고 "가장 최근에 본 name 줄"을 기억하는 방식이라 안전함.
-    python3 - "$continue_cfg" "$main_label" "$ac_label" <<'PYEOF'
+    python3 - "$continue_cfg" "$old_main" "$new_main" "$main_label" "autocomplete-starcoder2" "autocomplete-starcoder2" "$ac_label" <<'PYEOF'
 import re, sys
-path, main_label, ac_label = sys.argv[1], sys.argv[2], sys.argv[3]
-targets = {"main-llama": main_label, "autocomplete-starcoder2": ac_label}
+path, old_main, new_main, main_label, old_ac, new_ac, ac_label = sys.argv[1:8]
+targets = {old_main: (new_main, main_label), old_ac: (new_ac, ac_label)}
 with open(path) as f:
     lines = f.readlines()
+
+# ★최상위 기본 모델 지정("model: litellm-onprem/<served-name>", "- name:" 블록 밖의 zero-indent
+#   라인)도 함께 바꿔야 함 — 블록 컨텍스트 안 라인만 처리하면 이 줄이 누락돼 Continue가 여전히
+#   구 모델을 기본으로 가리키는 버그가 실측 확인됨.
+changed_top = []
+for i, line in enumerate(lines):
+    m0 = re.match(r'^model:\s*(\S+)\s*$', line)
+    if m0:
+        prefix_provider, _, cur_served = m0.group(1).rpartition('/')
+        if cur_served == old_main and new_main:
+            lines[i] = f'model: {prefix_provider}/{new_main}\n' if prefix_provider else f'model: {new_main}\n'
+            changed_top.append(old_main)
+        break  # 최상위 model: 은 파일에 1개뿐(모델 목록 블록 진입 전)
+
 last_name_idx = None
-changed = []
+changed = list(changed_top)
 for i, line in enumerate(lines):
     m = re.match(r'^(\s*-\s*name:\s*).*$', line)
     if m:
         last_name_idx = (i, m.group(1))
         continue
-    m2 = re.match(r'^\s*model:\s*(\S+)\s*$', line)
-    if m2 and m2.group(1) in targets and targets[m2.group(1)] and last_name_idx is not None:
-        idx, prefix = last_name_idx
-        # ★반드시 큰따옴표로 감쌀 것: 라벨에 ": "(콜론+공백)이 들어가면 따옴표 없는 YAML
-        #   스칼라가 매핑으로 잘못 해석돼 config.yaml 전체 파싱이 깨진다(실측 확인된 버그).
-        safe_val = targets[m2.group(1)].replace('"', '\\"')
-        lines[idx] = f'{prefix}"{safe_val}"\n'
-        changed.append(m2.group(1))
+    m2 = re.match(r'^(\s*model:\s*)(\S+)\s*$', line)
+    if m2 and m2.group(2) in targets and last_name_idx is not None:
+        new_model, label = targets[m2.group(2)]
+        if new_model:
+            lines[i] = f'{m2.group(1)}{new_model}\n'
+        if label:
+            idx, prefix = last_name_idx
+            # ★반드시 큰따옴표로 감쌀 것: 라벨에 ": "(콜론+공백)이 들어가면 따옴표 없는 YAML
+            #   스칼라가 매핑으로 잘못 해석돼 config.yaml 전체 파싱이 깨진다(실측 확인된 버그).
+            safe_val = label.replace('"', '\\"')
+            lines[idx] = f'{prefix}"{safe_val}"\n'
+        changed.append(m2.group(2))
         last_name_idx = None
 with open(path, 'w') as f:
     f.writelines(lines)
 print("갱신됨:", changed if changed else "(대상 없음)")
 PYEOF
-    ok "~/.continue/config.yaml 라벨 갱신 시도 완료(형식이 예상과 다르면 수동 확인 필요)"
+    ok "~/.continue/config.yaml 갱신 시도 완료(형식이 예상과 다르면 수동 확인 필요)"
   fi
 
   # ★Continue는 "현재 선택된 모델"을 이름(문자열)으로 캐싱한다(~/.continue/index/globalContext.json).
-  #   config.yaml의 라벨만 바꾸고 이 캐시를 안 맞춰주면, 캐시가 가리키는 이름이 더 이상 models 목록에
+  #   config.yaml만 바꾸고 이 캐시를 안 맞춰주면, 캐시가 가리키는 이름이 더 이상 models 목록에
   #   없어 UI 드롭다운이 통째로 비어 보이는 문제가 실측 확인됨. 항상 함께 갱신한다.
   local continue_ctx="$HOME/.continue/index/globalContext.json"
   if [[ -f "$continue_ctx" ]] && command -v python3 >/dev/null 2>&1; then
@@ -206,10 +344,21 @@ switch_to() {
   done
   ok "모델 디렉터리 존재 확인"
 
+  # 전환 전 현재 served-name 기억(라우트/클라이언트 갱신 시 old→new 치환에 필요)
+  local old_served_name
+  old_served_name="$(grep -E '^MAIN_SERVED_NAME=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  old_served_name="${old_served_name:-main-llama}"
+  local new_served_name="${PROFILE[MAIN_SERVED_NAME]:-${OPTIONAL_DEFAULTS[MAIN_SERVED_NAME]}}"
+
   log ".env 갱신 (시크릿·이미지태그 등 다른 값은 그대로 유지)"
   for k in "${REQUIRED_KEYS[@]}"; do
     patch_env_key "$k" "${PROFILE[$k]}"
     echo "  $k=${PROFILE[$k]}"
+  done
+  for k in "${!OPTIONAL_DEFAULTS[@]}"; do
+    local v="${PROFILE[$k]:-${OPTIONAL_DEFAULTS[$k]}}"
+    patch_env_key "$k" "$v"
+    echo "  $k=$v"
   done
 
   log "기존 vLLM 서비스 중지"
@@ -225,7 +374,11 @@ switch_to() {
   wait_healthy vllm-autocomplete || { err "autocomplete 기동 실패."; exit 1; }
   ok "autocomplete healthy"
 
-  update_client_labels
+  sync_litellm_main_route "$old_served_name" "$new_served_name" || { err "LiteLLM 라우트 동기화 실패 — vLLM은 정상이나 게이트웨이 경유 연결이 안 될 수 있음. 수동 확인 필요."; }
+
+  sync_key_allowlists "$old_served_name" "$new_served_name"
+
+  update_client_config "$old_served_name" "$new_served_name"
 
   ok "전환 완료: ${PROFILE[LABEL]:-$opt}"
   nvidia-smi --query-gpu=memory.used,memory.total,memory.free --format=csv,noheader | sed 's/^/  GPU: /'
