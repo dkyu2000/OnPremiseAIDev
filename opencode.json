@@ -11,9 +11,9 @@
       },
       "models": {
         "main-gptoss": {
-          "name": "Main — gpt-oss-120b (선택지 E: MXFP4)",
+          "name": "Main — gpt-oss-120b (선택지 G: 단독, FIM 없음)",
           "limit": {
-            "context": 26000,
+            "context": 60000,
             "output": 4096
           }
         }

@@ -58,17 +58,21 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
 
 ## 5. 모델 구성 (테스트 장비 전용)
 
-**★[2026-07-13 운영 정책 확정] 운영 구성 = 2-트랙 고정(main+autocomplete), 단 main/autocomplete에 실제로
-어떤 모델을 실을지는 운영자가 선택지 A/D/E 중 자유롭게 선택·전환할 수 있다(고정 채택이 아님).
-기본값(초기 기동 시작 구성)은 선택지 E다.** `scripts/switch_model_option.sh {a|d|e}`로 언제든 전환.
+**★[2026-07-13 운영 정책 확정, 2026-07-14 선택지 G 추가로 갱신] 운영 구성은 main/autocomplete에 실제로
+어떤 모델을 실을지(또는 autocomplete 자체를 뺄지)를 운영자가 선택지 A/D/E/G 중 자유롭게 선택·전환할
+수 있다(고정 채택이 아님). 기본값(초기 기동 시작 구성)은 선택지 E다.** A/D/E는 2-트랙(main+autocomplete)
+고정이지만 **G는 1-트랙(main 단독, FIM 없음)** — 컨텍스트를 최대한 확보하고 싶을 때 선택.
+`scripts/switch_model_option.sh {a|d|e|g}`로 언제든 전환.
+(※선택지 F(Llama NVFP4 단독)는 2026-07-14 실측까지 갔으나 품질 미달로 당일 폐기 — 완료보고서 §18.14.)
 서브 채팅 모델(Gemma 트랙)은 **선택지와 무관하게 앞으로 모든 환경(검증·운영)에서 사용하지 않는다**
 (2026-07-07 결정, 유지). 이유: ①단일 채팅 모델로 라우팅을 단순화(운영 복잡도·장애 지점 감소), ②서브를
 얹을 만큼 VRAM 여유가 넉넉하지 않음. 아래 서브/2-트랙-라우팅 항목은 **과거 검증 기록**이며 반영하지 않는다.
 
 - **선택지 E(기본값, 2026-07-13 채택) — 아키텍처가 다른 별도 모델:** `gpt-oss-120b`(OpenAI, main, 가중치
   ~65.97GB, MXFP4 네이티브 양자화 — 표준 MoE·128개 전문가 중 4개 활성, Llama 계열이 아님, served-model-name
-  `main-gptoss`) + `StarCoder2-7B FP8`(FIM 자동완성, 가중치 ~6.96GB). GPU 총사용 ~92.4GB/96GB(여유 ~5.4GB,
-  max-model-len 27648 기준). 채팅/에이전트 품질·속도가 Llama 구성(D)보다 우위(hard-set 품질 PoC 7/7 vs
+  `main-gptoss`) + `StarCoder2-7B FP8`(FIM 자동완성, 가중치 ~6.96GB). ★[2026-07-14 재튜닝] 사용자
+  편의를 위해 컨텍스트를 27648→**32768**로 상향(`MAIN_GPU_UTIL` 0.80→0.81), GPU 총사용 ~93.4GB/96GB
+  (여유 ~3.7GB — 선택지 D 수준의 안전 마진 유지, 상세는 완료보고서 §18.12). 채팅/에이전트 품질·속도가 Llama 구성(D)보다 우위(hard-set 품질 PoC 7/7 vs
   6.5/7, 처리량 8배)로 기본값 채택. LiteLLM(4000)은 `main-gptoss`+`autocomplete-starcoder2` 두 모델만
   라우팅한다. ★SM120이 vLLM의 MXFP4 백엔드 선택 로직에 미인식되어 Marlin 커널로 폴백되는 경고가 뜨나
   (업스트림 버그, `VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1`로도 우회 안 됨) 실사용 처리량(185 tok/s)엔
@@ -82,18 +86,33 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
 - **선택지 A(운영자 선택 가능, 2026-07-07 최초 채택) — Llama FP8+FIM 7B:** `Llama 3.3-70B FP8`(~70GB) +
   `StarCoder2-7B FP8`(~7GB). 합 ~77GB, 여유 ~30MiB로 매우 타이트 — 세 선택지 중 재기동 실패 리스크가
   가장 높아 특별한 사유 없으면 D/E 권장.
+- **선택지 G(운영자 선택 가능, 2026-07-14 신설) — gpt-oss-120b 단독(FIM 없음):** `gpt-oss-120b`(MXFP4)만
+  올리고 autocomplete(FIM) 자체를 기동하지 않아, StarCoder2가 쓰던 VRAM(가중치+KV 총 9.35GiB)이 전부
+  main의 KV캐시로 넘어간다. 실측: KV 15.96GiB(232,352토큰), `max-model-len=65536`(E의 2배),
+  GPU 여유 ~6.05GB. **IDE tab 자동완성은 이 구성에서 사용 불가** — 긴 대화/큰 문서 작업이 잦고
+  FIM은 필요 없는 사용자에게 권장. `AUTOCOMPLETE_ENABLED=false` 프로파일 키로 구현(단독 프로세스라
+  A/D/E의 "동시기동 간섭" 문제 자체가 없음).
 - **선택지 A/D/E 공통:** 두 vLLM은 반드시 **순차 기동**(main 먼저 실측 확인 후 autocomplete) — 동시 기동
   시 서로의 메모리 프로파일링이 간섭해 실제보다 훨씬 부족하게 계산되어 기동 실패한다(완료보고서 §13.3).
   선택지 전환 시 `litellm/config.yaml` 라우트명·클라이언트 설정·발급된 가상 키 allowlist까지 함께
   갱신해야 하는 경우가 있음(A↔D는 불필요, →E 전환처럼 아키텍처 자체가 바뀔 때만) — `switch_model_option.sh`가
-  전부 자동 처리(완료보고서 §18).
+  전부 자동 처리(완료보고서 §18). **★전환할 때마다 클라이언트(`opencode.json`)의 `context` 값도
+  각 선택지의 서버 실한도(`MAIN_MAX_LEN`)에 맞춰 함께 바뀐다**(프로파일의 `MAIN_CLIENT_CONTEXT` 키로
+  자동화됨, 2026-07-14 추가 — 안 맞으면 서버보다 큰 context를 클라이언트가 들고 있어 `max_tokens`
+  음수 오류가 재발하므로 이 동기화가 중요하다).
 - **[역사적 검증 기록, 미채택] 운영 서브 모델 실검증:** `Gemma 2-27B (FP8, ~27GB)` 단일 — Phase C에서 실측 통과했으나 운영 미채택.
 - **[역사적 검증 기록, 미채택] 2-트랙 라우팅 패턴 검증:** `Llama 3.1-8B-Instruct (FP8, ~8GB)` [메인 프록시] + `Gemma 2-9B-it (FP8, ~9GB)` [서브]
   — Phase B에서 vLLM 인스턴스 2개(포트 8000/8001) 동시상주·라우팅 분기를 실측 통과했으나 운영 미채택.
 - **IDE tab 자동완성(FIM) 검증:** `StarCoder2-7B/15B (FP8)` [autocomplete] — Llama/Gemma(instruct)는 FIM 미지원이라
   inline 자동완성 불가 → FIM 전용 코드 모델 별도. phase-ide 프로파일(main+autocomplete)로 검증(포트 8003).
   선택지별로 7B(A/E) 또는 15B(D) 중 운영자가 선택.
-- 중국계 모델(Qwen/DeepSeek 등)은 **보안 정책상 사용 금지** (제안서 기준) — 자동완성 모델도 비중국계(StarCoder2/CodeLlama)로 한정.
+- 중국계 모델(Qwen/DeepSeek 등)은 **운영 채택(선택지 A/D/E/F/G 등 정식 옵션) 금지** — 자동완성 모델도
+  비중국계(StarCoder2/CodeLlama)로 한정(제안서 기준 보안 정책).
+  ★[2026-07-14 정책 일부 변경] 사용자가 명시적으로 **"테스트(비교) 용도"에 한해 허용**하기로 결정함
+  — 성능/품질 비교를 위해 일시적으로 다운로드·기동해 벤치마크하는 것은 가능하나, **운영 라우팅에
+  올리거나(`litellm/config.yaml`에 정식 등록) 선택지 프로파일(`env-profiles/`)로 만들지는 않는다.**
+  테스트 완료 후에는 모델 파일을 정리하는 것을 권장. 이 예외는 이 결정 시점 이후에만 유효하며,
+  향후 세션에서 "중국계 모델 금지"라는 원 정책을 재확인하고 싶다면 이 각주를 참조할 것.
 
 ## 6. 🚫 금지 사항 (Never Do)
 

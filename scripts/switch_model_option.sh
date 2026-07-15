@@ -13,6 +13,10 @@
 # 새 구성 추가: env-profiles/option-<이름>.env 파일만 추가하면 된다(본 스크립트 수정 불필요).
 #   필수 키: LABEL, MAIN_MODEL_PATH, MAIN_GPU_UTIL, MAIN_MAX_LEN,
 #            AUTOCOMPLETE_MODEL_PATH, AUTOCOMPLETE_GPU_UTIL, AUTOCOMPLETE_MAX_LEN
+#   ★단독(solo) 구성(예: 선택지 G — FIM 없이 main만 올려 KV캐시를 최대 확보): 프로파일에
+#   AUTOCOMPLETE_ENABLED=false 를 명시하면 AUTOCOMPLETE_* 키가 필수에서 제외되고,
+#   vllm-autocomplete 컨테이너는 아예 기동하지 않는다(IDE tab 자동완성 사용 불가 — 필요하면
+#   A/D/E로 전환).
 #   상세 형식: env-profiles/README.md 참조.
 
 set -euo pipefail
@@ -21,7 +25,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$ROOT/.env"
 PROFILE_DIR="$ROOT/env-profiles"
 LITELLM_CONFIG="$ROOT/litellm/config.yaml"
-REQUIRED_KEYS=(MAIN_MODEL_PATH MAIN_GPU_UTIL MAIN_MAX_LEN AUTOCOMPLETE_MODEL_PATH AUTOCOMPLETE_GPU_UTIL AUTOCOMPLETE_MAX_LEN)
+MAIN_REQUIRED_KEYS=(MAIN_MODEL_PATH MAIN_GPU_UTIL MAIN_MAX_LEN)
+AUTOCOMPLETE_REQUIRED_KEYS=(AUTOCOMPLETE_MODEL_PATH AUTOCOMPLETE_GPU_UTIL AUTOCOMPLETE_MAX_LEN)
 # 선택 키: 프로파일에 없으면 Llama 계열 기본값으로 리셋(전환 후 .env에 이전 구성 값이 안 남도록).
 # main이 Llama가 아닌 아키텍처(예: gpt-oss)로 바뀔 때만 프로파일에 명시한다.
 declare -A OPTIONAL_DEFAULTS=(
@@ -29,6 +34,7 @@ declare -A OPTIONAL_DEFAULTS=(
   [MAIN_TOOL_PARSER]=llama3_json
   [MAIN_EXTRA_ARGS]=""
   [MAIN_MXFP4_FLASHINFER]=0
+  [AUTOCOMPLETE_ENABLED]=true
 )
 
 log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
@@ -222,18 +228,25 @@ update_client_config() {
   local old_main="$1" new_main="$2"
   local main_label="${PROFILE[MAIN_CLIENT_LABEL]:-}"
   local ac_label="${PROFILE[AUTOCOMPLETE_CLIENT_LABEL]:-}"
+  # ★프로파일마다 MAIN_MAX_LEN(서버 실한도)이 다르므로(A/D 27648, E 32768, G 65536 등),
+  #   클라이언트가 선언하는 context도 매번 함께 맞춰야 한다 — 안 맞추면 서버 한도보다 클라이언트
+  #   context가 더 큰 상태로 남아(예: G→E 전환 후 opencode.json이 여전히 60000) 실제 대화가 서버
+  #   한도를 넘길 때 max_tokens 음수 오류가 재발한다(완료보고서 §18.12/§production-golive 메모리
+  #   참조). 프로파일에 MAIN_CLIENT_CONTEXT가 없으면 기존 값을 그대로 둔다(변경 없음).
+  local client_context="${PROFILE[MAIN_CLIENT_CONTEXT]:-}"
 
   if [[ -f "$ROOT/opencode.json" ]] && command -v jq >/dev/null 2>&1; then
     log "opencode.json 갱신"
     local tmp; tmp="$(mktemp)"
-    jq --arg old "$old_main" --arg new "$new_main" --arg label "$main_label" '
+    jq --arg old "$old_main" --arg new "$new_main" --arg label "$main_label" --arg ctx "$client_context" '
       .model = (.model | sub("/" + $old + "$"; "/" + $new)) |
       .provider["litellm-onprem"].models[$new] = (
         (.provider["litellm-onprem"].models[$old] // {}) + (if $label != "" then {name: $label} else {} end)
       ) |
-      if $old != $new then .provider["litellm-onprem"].models |= del(.[$old]) else . end
+      if $old != $new then .provider["litellm-onprem"].models |= del(.[$old]) else . end |
+      if $ctx != "" then .provider["litellm-onprem"].models[$new].limit.context = ($ctx | tonumber) else . end
     ' "$ROOT/opencode.json" > "$tmp" && mv "$tmp" "$ROOT/opencode.json"
-    ok "opencode.json: $old_main → $new_main${main_label:+ (\"$main_label\")}"
+    ok "opencode.json: $old_main → $new_main${main_label:+ (\"$main_label\")}${client_context:+, context→$client_context}"
   fi
 
   local continue_cfg="$HOME/.continue/config.yaml"
@@ -325,15 +338,26 @@ switch_to() {
   [[ -f "$file" ]] || { err "프로파일 없음: $file"; list_profiles; exit 2; }
 
   load_profile "$file"
-  for k in "${REQUIRED_KEYS[@]}"; do
+  local solo=0
+  [[ "${PROFILE[AUTOCOMPLETE_ENABLED]:-true}" == "false" ]] && solo=1
+
+  for k in "${MAIN_REQUIRED_KEYS[@]}"; do
     [[ -n "${PROFILE[$k]:-}" ]] || { err "프로파일 $file 에 $k 누락"; exit 2; }
   done
+  if [[ "$solo" == "0" ]]; then
+    for k in "${AUTOCOMPLETE_REQUIRED_KEYS[@]}"; do
+      [[ -n "${PROFILE[$k]:-}" ]] || { err "프로파일 $file 에 $k 누락"; exit 2; }
+    done
+  fi
 
   log "전환 대상: ${PROFILE[LABEL]:-$opt}"
+  [[ "$solo" == "1" ]] && warn "단독(solo) 구성 — vllm-autocomplete는 기동하지 않습니다(IDE tab 자동완성 사용 불가, 필요시 A/D/E로 전환)."
 
   # 모델 디렉터리 실존 확인(사전 스테이징 여부) — 서비스 중단 전에 미리 검증
   local models_dir; models_dir="$(grep -E '^MODELS_DIR=' "$ENV_FILE" | head -1 | cut -d= -f2- || echo ./models)"
-  for pathkey in MAIN_MODEL_PATH AUTOCOMPLETE_MODEL_PATH; do
+  local pathkeys=(MAIN_MODEL_PATH)
+  [[ "$solo" == "0" ]] && pathkeys+=(AUTOCOMPLETE_MODEL_PATH)
+  for pathkey in "${pathkeys[@]}"; do
     local rel="${PROFILE[$pathkey]#/models/}"
     local dir="$ROOT/${models_dir#./}/$rel"
     if [[ ! -d "$dir" ]]; then
@@ -351,7 +375,9 @@ switch_to() {
   local new_served_name="${PROFILE[MAIN_SERVED_NAME]:-${OPTIONAL_DEFAULTS[MAIN_SERVED_NAME]}}"
 
   log ".env 갱신 (시크릿·이미지태그 등 다른 값은 그대로 유지)"
-  for k in "${REQUIRED_KEYS[@]}"; do
+  local keys_to_patch=("${MAIN_REQUIRED_KEYS[@]}")
+  [[ "$solo" == "0" ]] && keys_to_patch+=("${AUTOCOMPLETE_REQUIRED_KEYS[@]}")
+  for k in "${keys_to_patch[@]}"; do
     patch_env_key "$k" "${PROFILE[$k]}"
     echo "  $k=${PROFILE[$k]}"
   done
@@ -366,13 +392,18 @@ switch_to() {
 
   log "main 기동(단독) — 순차 기동 1/2"
   DC up -d vllm-main
-  wait_healthy vllm-main || { err "main 기동 실패. autocomplete는 올리지 않고 중단."; exit 1; }
+  wait_healthy vllm-main || { err "main 기동 실패."; exit 1; }
   ok "main healthy"
 
-  log "autocomplete 기동 — 순차 기동 2/2"
-  DC up -d vllm-autocomplete
-  wait_healthy vllm-autocomplete || { err "autocomplete 기동 실패."; exit 1; }
-  ok "autocomplete healthy"
+  if [[ "$solo" == "1" ]]; then
+    log "solo 구성 — autocomplete는 기동하지 않고 중지 상태로 유지"
+    ok "vllm-autocomplete 정지 상태 확인(VRAM 미점유)"
+  else
+    log "autocomplete 기동 — 순차 기동 2/2"
+    DC up -d vllm-autocomplete
+    wait_healthy vllm-autocomplete || { err "autocomplete 기동 실패."; exit 1; }
+    ok "autocomplete healthy"
+  fi
 
   sync_litellm_main_route "$old_served_name" "$new_served_name" || { err "LiteLLM 라우트 동기화 실패 — vLLM은 정상이나 게이트웨이 경유 연결이 안 될 수 있음. 수동 확인 필요."; }
 

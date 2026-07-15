@@ -41,11 +41,19 @@ MAIN_MXFP4_FLASHINFER=0              # 기본값. gpt-oss(MXFP4) 계열만 1
 스크립트는 안전하게 낮은 값으로 먼저 시도하다 실패하면 로그를 보여주고 중단하므로, 처음엔 보수적인 값으로
 시작해도 된다.
 
+**단독(solo) 구성 — FIM 없이 main만 기동(예: 선택지 G):** `AUTOCOMPLETE_ENABLED=false`를 프로파일에
+추가하면 `AUTOCOMPLETE_MODEL_PATH`/`AUTOCOMPLETE_GPU_UTIL`/`AUTOCOMPLETE_MAX_LEN` 세 키가 필수에서
+제외되고, 전환 스크립트가 `vllm-autocomplete` 컨테이너를 아예 기동하지 않는다(해당 VRAM이 전부
+main의 KV캐시로 넘어감 — 컨텍스트를 크게 확보할 수 있는 대신 IDE tab 자동완성은 그 구성이 활성인
+동안 사용 불가). 이 키를 생략하면(기본값 `true`) 지금까지와 동일하게 2-트랙으로 기동한다.
+
 ## 현재 구성 파일
 | 파일 | 구성 |
 |---|---|
 | `option-a.env` | 선택지 A(구) — Llama 3.3-70B **FP8** + StarCoder2-**7B** FP8, GPU 여유 ~1.4GB |
 | `option-d.env` | 선택지 D(구) — Llama 3.3-70B **NVFP4** + StarCoder2-**15B** FP8, GPU 여유 ~3.5GB |
-| `option-e.env` | 선택지 E(현재 채택, 2026-07-13~) — **gpt-oss-120b MXFP4**(다른 아키텍처) + StarCoder2-**7B** FP8, GPU 여유 ~5.4GB |
+| `option-e.env` | 선택지 E(현재 채택, 2026-07-13~) — **gpt-oss-120b MXFP4**(다른 아키텍처) + StarCoder2-**7B** FP8, GPU 여유 ~3.7GB(컨텍스트 32768, 2026-07-14 재튜닝) |
+| `option-g.env` | 선택지 G(신규, 2026-07-14~) — **gpt-oss-120b MXFP4 단독**(FIM 없음), 컨텍스트 65536, GPU 여유 ~6.05GB |
 
-상세 비교는 `docs/VALIDATION_COMPLETION_REPORT.md` §13.9(A vs D), §17(D vs E) 참조.
+상세 비교는 `docs/VALIDATION_COMPLETION_REPORT.md` §13.9(A vs D), §17(D vs E), §18.13(G) 참조.
+(※선택지 F(Llama NVFP4 단독)는 2026-07-14 실측 후 품질 미달로 당일 폐기 — §18.14 기록만 남김.)

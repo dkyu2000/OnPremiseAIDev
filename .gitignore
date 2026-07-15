@@ -1,12 +1,15 @@
 # 시크릿 (NFR-5: 평문 커밋 금지) — .env.example 및 env-profiles/*.env(시크릿 없음, 모델 경로/util만)만 커밋
 .env
 *.env
+.env.bak*
 !.env.example
 !env-profiles/*.env
 
 # 사전 스테이징 모델 가중치 (오프라인 반입, 리포에 넣지 않음)
 models/*
 !models/.gitkeep
+# 테스트 전용 모델 가중치 (2차 프로젝트 후보 비교용 — 운영 미등록, 리포 제외)
+models-test/
 
 # 백업 산출물 (scripts/backup.sh)
 backups/

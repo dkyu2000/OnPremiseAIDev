@@ -1120,9 +1120,157 @@ think-time 5~20초, chat(70%, `main-gptoss`, `max_tokens=300`)+FIM(30%, `autocom
 확인됨.** `docs/OPERATOR_GUIDE.md` §10에 "E 운영 시 클라이언트 `max_tokens` 기본값을 900 이상으로
 설정"을 필수 권고로 승격 반영.
 
+### 18.12 사용자 편의를 위한 컨텍스트 소폭 확장 재튜닝 (2026-07-14)
+
+운영팀(사용자) 요청: OpenCode에서 `/opsx:explore` 등 반복 작업 중 세션이 컨텍스트 한도(27648)를
+넘겨 `max_tokens must be at least 1, got -N` 오류가 자주 발생 — 편의를 위해 컨텍스트를 2배로
+늘리는 방안을 검토해달라는 요청에서 시작.
+
+**2배(약 55000) 확장은 기각.** 현재 KV캐시(6.46GiB@27648)와 동일한 동시성을 유지하려면 KV 예산이
+거의 2배(~12.9GiB) 필요한데, 가용 여유는 4.7GB뿐이라 산술적으로 불가능(기동 실패 또는 동시성
+급감 중 택일). 대신 **여유 안에서 가능한 소폭 확장**으로 재검토:
+
+- **적용값**: `MAIN_MAX_LEN` 27648→**32768**(+18.5%), `MAIN_GPU_UTIL` 0.80→**0.81**.
+- **실측 결과**: `vllm-main` 재기동 후 KV캐시 7.41GiB 확보(107,888토큰), GPU 총사용 93,424MiB/
+  97,887MiB(**여유 3,818MiB=3.7GB**). 컨테이너 healthy, autocomplete/litellm 영향 없음(main만
+  단독 재기동).
+- **★사전 추정 오류 발견 및 정정**: 애초 "동시성 5.23x"(§17.5 기록)를 근거로 "동시 처리 5명"을
+  유지하며 확장 가능할 것으로 추정했으나, 실측 KV(7.41GiB→107,888토큰)에서 토큰당 실제 메모리
+  비용을 역산해 기존 설정(6.46GiB@27648)에 그대로 대입하면 **실제 동시성은 약 3.4x**였던 것으로
+  재계산됨(5.23x는 부정확한 과거 기록으로 판단). 재튜닝 후 실제 동시성은 약 3.3x — 즉 **이번
+  변경은 동시성을 거의 그대로 유지하면서 컨텍스트만 18.5% 확장한 결과**이며, 사용자가 요청한
+  "동시성 5명 유지"는 애초 이 하드웨어 여유(가용 총 VRAM 97.9GB, 가중치만 72.93GiB 고정 소모)로는
+  27648 기준으로도 달성된 적이 없었던 목표였음을 확인·공유함.
+- **여유 3.7GB는 선택지 D(3.5~4.5GB)와 동급** — §2의 "여유 타이트한 구성은 재기동 실패 리스크
+  최고"(구 선택지 A, 여유 30MiB) 사례와는 명확히 다른 안전 범위.
+- **후속 반영**: `env-profiles/option-e.env`(`MAIN_GPU_UTIL=0.81`/`MAIN_MAX_LEN=32768`),
+  `CLAUDE.md` §5, `OPERATOR_GUIDE.md` §10, `USER_GUIDE.md`(FAQ 3건) 전부 갱신. 클라이언트
+  `opencode.json`(본 리포/`opencode.json.example`/test_prj/test_prj_schedule 전체)의
+  `limit.context`도 26000→**30000**으로 동반 상향(서버 실한도 32768보다 여유 둠, 기존 원칙 유지).
+- **결론**: "컨텍스트를 2배로"라는 원 요청은 VRAM 한계로 불가하나, 안전 마진 내에서 실질적인
+  개선(+18.5% 컨텍스트, 동시성 손실 없음)을 제공하는 선에서 확정. 추가 확장은 여유가 위험
+  구간(1GB 이하)에 진입하므로 권장하지 않음 — 더 필요하면 A/D로 임시 전환하거나 근본적으로는
+  워크플로우 개선(§USER_GUIDE.md의 "공유 메모 파일" 패턴, 세션 분리)을 우선 권장.
+
+### 18.13 선택지 G 신설: gpt-oss-120b 단독(FIM 없음, 컨텍스트 최대 확보) (2026-07-14)
+
+§18.12 재튜닝 직후 사용자가 "FIM 없이 main만 올려서 KV캐시를 최대한 확보"하는 새 선택지를
+요청했다. 진행 전 두 가지를 확인함(AskUserQuestion):
+1. G 적용 시 IDE tab 자동완성이 완전히 꺼지는 것에 동의 — 사용자 확인: "G는 채팅/에이전트
+   전용, FIM 필요 시 A/D/E로 전환".
+2. 목표 컨텍스트 — 사용자 확인: "65536(현재의 2배)".
+
+**인프라 변경(A/D/E와 다른 신규 패턴 — 최초의 1-트랙 구성):**
+- `scripts/switch_model_option.sh`에 `AUTOCOMPLETE_ENABLED=false` 프로파일 키 지원 추가.
+  `REQUIRED_KEYS`를 `MAIN_REQUIRED_KEYS`/`AUTOCOMPLETE_REQUIRED_KEYS`로 분리해, solo 프로파일은
+  autocomplete 관련 키 없이도 유효성 검증을 통과하도록 함. solo일 때는 모델 디렉터리 검증도
+  main만 수행하고, `vllm-autocomplete`는 기동하지 않고 정지 상태로 유지(순차 기동 로직 자체가
+  불필요 — 단독 프로세스라 §13.3의 "동시기동 시 메모리 프로파일링 간섭" 문제가 원천적으로 없음).
+- **부수적으로 발견한 잠재 버그를 함께 고침**: 기존 스크립트는 선택지 전환 시 `opencode.json`의
+  모델 키/라벨은 갱신했지만 `limit.context`(클라이언트가 선언하는 컨텍스트 한도)는 갱신하지
+  않았다. A/D(27648)→E(32768, §18.12 재튜닝)→G(65536)처럼 선택지마다 서버 실한도가 달라지는
+  경우가 실제로 생기면서, 방치하면 "서버보다 큰 context를 클라이언트가 들고 있어 max_tokens
+  음수 오류가 재발"하는 문제가 될 수 있음을 인지 — `MAIN_CLIENT_CONTEXT` 프로파일 키를 추가하고
+  `update_client_config()`가 이 값을 `opencode.json`에 함께 반영하도록 확장(A/D=26000, E=30000,
+  G=60000으로 각 프로파일에 기록). 향후 어떤 선택지로 전환하든 클라이언트 context가 자동으로
+  같이 맞춰진다.
+
+**실측 결과(`switch_model_option.sh g` 1차 시도로 즉시 성공):**
+
+| 항목 | 값 |
+|---|---|
+| main 가중치 | 65.97GiB(고정) |
+| `MAIN_GPU_UTIL` | 0.90 |
+| `MAIN_MAX_LEN` | 65536 |
+| KV캐시(실측) | 15.96GiB, 232,352토큰 |
+| 동시성(풀컨텍스트 기준) | 약 3.55x |
+| GPU 총사용/여유 | 91,055MiB / **6,187MiB(6.05GB)** |
+
+여유 6.05GB는 지금까지의 A/D/E 어떤 구성보다도 크다 — FIM(가중치+KV 9.35GiB)을 완전히 뺀 효과가
+사전 추정(약 9.8GB 이론 여유, util 0.90 가정)보다는 작았지만(vLLM 오버헤드가 예상보다 더 소모),
+그래도 E(3.7GB)의 약 1.6배 수준. E2E 검증: LiteLLM 경유 `main-gptoss` 정상 응답(200) 확인,
+`autocomplete-starcoder2` 요청은 의도대로 연결 오류(500, 컨테이너 미기동) 확인.
+
+**결론**: G는 여섯 선택지(A/B/C/D/E/G, B/C는 미채택) 중 컨텍스트(65536)·GPU 여유(6.05GB) 모두
+최대이며, FIM을 완전히 포기하는 대가로 얻는 트레이드오프임을 `CLAUDE.md`/`OPERATOR_GUIDE.md`
+§10 "운영자 선택 가이드" 표에 명시 반영. `env-profiles/option-g.env`, `env-profiles/README.md`
+(solo 구성 설명 추가) 갱신 완료.
+
+### 18.14 선택지 F 시도·철회: Llama 3.3-70B NVFP4 단독 (2026-07-14, 당일 폐기)
+
+G의 solo 패턴을 Llama-NVFP4에 적용한 "선택지 F"를 사용자 요청으로 신설·실측까지 완료했으나,
+**실사용 품질 미달로 당일 폐기**했다(사용자 결정: "F는 삭제하고 G 중심으로 정리").
+
+- **실측 기록(참고 가치)**: weights 39.89GiB, util 0.90 → KV 43.29GiB(141,840토큰). 1차 시도
+  `MAIN_MAX_LEN=98304`(동시성 1.44x), 사용자 요청으로 2차 재튜닝 `40000`(동시성 G 수준 3.55x).
+  GPU 여유 6.9GB. **이 수치들은 "Llama 계열 solo 구성이 필요해질 경우"의 베이스라인으로 유효.**
+- **철회 사유**: ①실사용에서 채팅/에이전트 품질이 gpt-oss 대비 명확히 체감 열세(품질 PoC 6.5/7
+  vs 7/7, 처리량 1/8~1/20의 기존 실측과 일치하는 사용자 평가), ②Llama로 전환 후 OpenCode
+  슬래시 명령(`/opsx:explore <파일>`)을 통째로 파일 경로로 오인하는 도구 호출 파싱 불안정이
+  간헐 재현(gpt-oss에서는 미재현 — 모델별 tool-calling 신뢰도 차이).
+- **부산물(유지됨)**: 이 작업으로 추가된 `MAIN_CLIENT_CONTEXT` 프로파일 키(전환 시 클라이언트
+  context 자동 동기화)와 `AUTOCOMPLETE_ENABLED=false` solo 지원은 F 폐기와 무관하게 스크립트에
+  남아 G 등 다른 구성에서 계속 사용된다.
+- `env-profiles/option-f.env` 삭제, `CLAUDE.md`/`env-profiles/README.md`에서 F 항목 제거(본 절이
+  유일한 기록).
+
 ---
 
-## 부록. 산출물 목록
+## 19. 2차 개선 프로젝트 (2026-07-15~)
+
+운영 중 확인된 요구("gpt-oss-120b 이상의 품질", "KV 캐시 효율화")를 목표로 한 단계별 개선
+프로젝트. 로드맵: **Phase 1** 모델 품질 경쟁(GLM-4.5-Air 등 후보 vs gpt-oss) → **Phase 2**
+vLLM 0.20.2+ 업그레이드 검증 → **Phase 3** KV 효율화(TurboQuant/TriAttention/fp8 KV) 실측 →
+**Phase 4** SGLang 전환은 보류(TurboQuant이 vLLM에만 병합돼 있어 전환 시 오히려 손해 — 사전
+분석으로 기각). 관련 배경: 중국계 모델 정책이 "테스트 용도 한정 허용"으로 변경됨(2026-07-14,
+CLAUDE.md §5 각주).
+
+### 19.1 Phase 1: GLM-4.5-Air NVFP4 품질 PoC (2026-07-15)
+
+**후보 선정 근거**: GLM-4.6은 vLLM 소스 확인 결과 `GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM)`
+상속 = DeepSeek와 동일한 MLA 어텐션 → SM120 전멸(§16 Mistral과 동일 원인)이 예상되어 배제.
+GLM-4.5-Air(`Glm4MoeForCausalLM`)는 표준 어텐션(kv_lora_rank 없음)으로 안전 확인 후 선정.
+공식 zai-org FP8은 104.83GiB로 GPU 초과 → 커뮤니티 NVFP4(`Firworks/GLM-4.5-Air-nvfp4`,
+57.68GiB, nvfp4-pack-quantized, 사용자 승인)로 진행.
+
+**다운로드 이슈**: HF 비인증 다운로드가 2회 연속 장시간 정체(연결이 소리 없이 끊긴 채 프로세스만
+생존) + `hf download` 재시작 시 진행 중이던 파일의 이어받기 실패(새 임시파일로 재시작) 확인 →
+남은 파일만 `curl -C -`(이어받기) + 정체 자동감지(`--speed-time 60 --speed-limit 51200`) 재시도
+루프로 전환해 해결. **향후 대용량 모델 반입 시 이 curl 패턴 재사용 권장.** 전체 파일 크기 대조
+(HF 메타데이터 vs 로컬)로 무결성 검증 통과(13/13).
+
+**기동 실측(vLLM 0.17.1 그대로, 단독, util 0.90, max-len 8192)**:
+
+| 항목 | GLM-4.5-Air NVFP4 | 비교: gpt-oss-120b(G) |
+|---|---|---|
+| 아키텍처 | 106B/12B active MoE, 표준 어텐션(FLASH_ATTN) | 120B/5.1B active MoE |
+| 기동 | ✅ 0.17.1 즉시 성공(업그레이드 불필요) | ✅ |
+| 가중치 | 57.75GiB | 65.97GiB(−8.2GiB 유리) |
+| KV 토큰당 비용(역산) | **~184KB/token** | ~72KB/token(**2.5배 유리**) |
+| 스모크 테스트 | 정상(garbage 없음, 한국어 OK) | — |
+
+**품질 PoC(§17.8과 동일 hard/easy-set, temperature=0)**:
+
+| 조건 | GLM-4.5-Air | gpt-oss-120b(§17.8 기록) |
+|---|---|---|
+| hard-set @900tok | 3/7 완결(완결분 전부 정답, 4개 thinking 잘림) | 7/7 |
+| hard-set @2000tok | **7/7 전부 정답** | (측정 불필요 — 900에서 이미 7/7) |
+| easy-set @900tok | 4/5 완결(전부 정답, 1개 잘림) | — |
+| 처리량(단일 요청) | 87~91 tok/s | 184~185 tok/s(**2배 유리**) |
+
+- GLM도 thinking 모드 기본 활성(`<think>…</think>` 인라인, chat template에서 `/nothink`로 끄기
+  가능). **thinking이 gpt-oss의 harmony보다도 길어서** 완결에 필요한 max_tokens가 900으로도
+  부족(hard 4/7, easy 1/5 잘림) — **GLM 채택 시 max_tokens 2000+ 필요**(gpt-oss는 900).
+
+**Phase 1 결론: GLM-4.5-Air는 "동급"이지 "이상"이 아님 — gpt-oss-120b 유지.**
+품질은 hard-set 7/7로 대등하나, ①처리량 절반, ②응답당 토큰 소모 2배 이상(thinking 길이),
+③KV 토큰당 비용 2.5배(solo 구성 시 유효 컨텍스트 용량 열세: 같은 util 0.90에서 GLM 144K vs
+gpt-oss 232K 토큰)로 **세 가지 효율 지표 모두 열세**. 교체할 근거 없음. 단, **중국계·비중국계
+통틀어 gpt-oss 외에 이 하드웨어에서 정상 동작이 확인된 첫 번째 대등 품질 백업 후보**라는 가치가
+있음(§16의 Mistral/Nemotron은 기동조차 실패). 모델 파일은 `models-test/glm-4.5-air-nvfp4`에
+보존(테스트 전용 — 운영 정책상 정식 선택지 등록 금지, CLAUDE.md §5 각주).
+
+테스트 후 G 원복 및 LiteLLM 경유 E2E 정상(200) 재확인 완료.
 
 | 구분 | 산출물 |
 |------|------|
@@ -1133,7 +1281,7 @@ think-time 5~20초, chat(70%, `main-gptoss`, `max_tokens=300`)+FIM(30%, `autocom
 | 구성 프로파일 | `env-profiles/`: option-a.env, option-d.env, option-e.env(기본값) — 셋 다 운영자 상시 선택 가능(§10, §18.7) |
 | 문서 | `REQUIREMENTS.md`, `TEST_PLAN.md`, `CLAUDE.md`, `docs/OPERATOR_GUIDE.md`, `docs/USER_GUIDE.md`, `docs/POC_FP4_QUANT_COMPARISON.md`, 본 보고서 |
 | 클라이언트(실제 사용 중) | `opencode.json`, `~/.continue/config.yaml` |
-| **클라이언트 배포용 템플릿(신규, 시크릿 없음)** | **`opencode.json.example`, `continue-config.yaml.example`** — 사용자 배포용, 서버주소/키만 교체하면 됨 |
+| **클라이언트 배포용 템플릿(신규, 시크릿 없음)** | **`opencode.json.example`, `continue-config.yaml.example`, `AGENTS.md.example`**(전역 한국어 응답 지침, §USER_GUIDE.md "설정" 참조) — 사용자 배포용, 서버주소/키만 교체하면 됨 |
 | 스테이징 모델 | Llama 8B(FP8/NVFP4), Gemma 9B/27B(FP8), StarCoder2-7B(FP8), Qwen2.5-Coder-7B(FP8), Mistral-24B(NVFP4) — 검증장비(5090) |
 | 운영 스테이징 모델(구, §11.5~§13) | Llama 3.3-70B-Instruct(FP8 ~68GB, 선택지 A) / NVFP4 ~40GB+StarCoder2-15B(선택지 D) — 운영장비(RTX PRO 6000) |
 | **운영 스테이징 모델(현재 기본값, §17~18)** | **gpt-oss-120b(MXFP4, ~66GB) + StarCoder2-7B(FP8, ~7GB)** — 운영장비(RTX PRO 6000), 선택지 A/D로 언제든 전환 가능 |
