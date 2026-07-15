@@ -1435,6 +1435,44 @@ max-len 65536, 격리 테스트 후 운영 원복).
   단 커뮤니티 프로젝트(v0.2.0) 의존성·업스트림 미병합·모델별 통계 파일 필요가 운영 리스크.
 - **TurboQuant는 gpt-oss와 구조적 비호환**(sinks) — 모델을 바꾸지 않는 한 대상 아님.
 
+### 19.7 추가 모델 후보 재검토: Mistral 재시도 실패, Nemotron-3-Super 신규 검증 (2026-07-15~)
+
+사용자 요청("gpt-oss-120b 이상의 추가 모델")으로 후보를 재검토했다. 사전 조사 결론:
+- **Nemotron-3-Super-120B-A12B**: 공개 벤치마크에서 gpt-oss-120b 대비 실질 우위 확인 —
+  **SWE-Bench Verified 60.5 vs 41.9**(개발자 에이전트 용도에 결정적), MMLU-Pro 83.7 vs 80.7,
+  컨텍스트 256K vs 128K. 단 속도 ~2배 느림, AIME는 gpt-oss 우위. 공식 NVIDIA NVFP4(80.37GB) 존재,
+  v0.20.2에 `NemotronHForCausalLM` 정식 등록 확인 → **다운로드·검증 진행**(1순위).
+- **GLM-5.2(754B)/Qwen3-235B/MiniMax**: 96GB 초과로 물리적 불가. **Llama 4 Scout**: 들어가지만
+  벤치마크상 gpt-oss 이상 아님. **DeepSeek/Kimi 계열**: MLA로 SM120 불가.
+
+**Mistral-Small-4-119B 재시도(v0.20.2) — 최종 실패 확정:**
+- v0.20.2의 MLA 백엔드 지원을 소스에서 직접 확인: CUTLASS_MLA(major==10)/FLASHMLA(9,10)/
+  FLASHINFER_MLA(10)/FLASHATTN_MLA(9) — **전용 커널 4종 모두 여전히 SM120(major 12) 미지원**.
+- 실측: 기동·가중치 로드(66.21GiB)·헬스체크까지는 통과(TRITON_MLA 선택, MLA의 KV 압축 덕에
+  761K토큰 확보)했으나, **첫 추론에서 §16과 동일한 Triton 커널 크래시 재현**
+  (`CompilationError: Cannot make_shape_compatible: incompatible dimensions at index 1: 256 and 512`
+  — kv_lora_rank=256 형상 불일치). 0.20.0→0.20.2에서 수정되지 않음.
+- **결론: MLA 계열은 vLLM이 SM120용 MLA 커널을 정식 추가하기 전까지 이 하드웨어에서 불가**(§16
+  결론 유지·강화). 모델 파일은 보존(향후 vLLM 메이저 업그레이드 시 재시도 후보).
+
+**Nemotron-3-Super 메모리 사전 분석(다운로드된 config.json 실수치 기반, 실측 전 추정):**
+
+아키텍처가 특이하다 — 88개 레이어 중 **어텐션이 단 8개**(hybrid_override_pattern에서 `*`=8,
+Mamba2 `M`=40, MoE `E`=40), 그 8개도 극단적 GQA(num_key_value_heads=2, head_dim=128).
+
+| 항목 | gpt-oss-120b(운영 실측) | Nemotron-3-Super(config 기반 계산) |
+|---|---|---|
+| 가중치 | 65.97GiB | ~74.9GiB(+9GiB) |
+| KV/토큰(BF16) | 40.6KB | **8.0KB(1/5)** |
+| Mamba 고정 상태 | 없음 | 시퀀스당 80MiB(길이 무관, 동시 수에 비례) |
+| 네이티브 컨텍스트 | 131K | **262K** |
+
+util 0.90 가정 시 KV 풀 ~8.7GiB(가중치가 커서 gpt-oss의 14.7GiB보다 작음)이나 토큰당 비용이
+1/5이라 **BF16 KV만으로 ~110만 토큰**(gpt-oss fp8 KV의 763K를 상회), 256K 풀컨텍스트 동시 ~4명
+추정. 요약: 가중치는 더 무겁지만 KV 경제성 5배 — **gpt-oss가 물리적으로 불가능한 초장문(256K)
+작업이 가능한 구조**. 단 GPU 여유 마진 축소(util 하향 조정 가능성)와 Mamba 상태의 동시 수 비례
+증가는 실측으로 확정 필요. 다운로드(80GB) 진행 중 — 완료 후 격리 기동/품질 PoC 예정.
+
 | 구분 | 산출물 |
 |------|------|
 | IaC | `docker-compose.yml`, `.env(.example)` |
