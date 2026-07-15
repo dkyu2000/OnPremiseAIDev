@@ -1326,6 +1326,33 @@ util 0.90 / max-len 65536).
 ②`VLLM_IMAGE=vllm/vllm-openai:v0.20.2`, ③reasoning 필드명 변경의 클라이언트 영향 확인,
 ④전환 후 동시성 부하 테스트 재실행(§13 방법론). 테스트 후 G(0.17.1) 원복·E2E 정상(200) 확인.
 
+### 19.3 운영 전환 실행: vLLM v0.17.1 → v0.20.2 (2026-07-15, 사용자 승인)
+
+§19.2 체크리스트대로 실제 운영 전환을 수행했다(선택지 G 구성 유지, 엔진만 교체).
+
+**변경 사항:**
+- `.env`: `VLLM_IMAGE=vllm/vllm-openai:v0.20.2`, `MAIN_MXFP4_FLASHINFER=1→0`
+- `env-profiles/option-e.env`/`option-g.env`: `MAIN_MXFP4_FLASHINFER=0`으로 영구 수정(주석으로
+  0.20.2 기동 거부 사유 명시 — 향후 어떤 프로파일 전환에도 이 함정 재발 방지)
+- `.env.example`, `CLAUDE.md` §2/§4 고정 버전 표 갱신
+- KV dtype은 `auto` 유지(fp8 KV는 §19.2에서 검증됐으나 소크 테스트 후 별도 채택 결정 — Phase 3)
+
+**전환 후 검증(전부 통과):**
+
+| 검증 항목 | 결과 |
+|---|---|
+| vllm-main healthy | ✅ MARLIN 자동 선택, KV 380,114토큰(+64%) |
+| LiteLLM 경유 채팅 E2E | ✅ 200, **LiteLLM이 `reasoning`→`reasoning_content`로 정규화해줌**(클라이언트 영향 없음 확인) |
+| LiteLLM 경유 tool calling | ✅ 정상 — 단 **v0.20.2는 tool 정의의 `description` 필드를 필수로 검증**(누락 시 400). OpenCode/Continue는 항상 포함하므로 실사용 영향 없음, 직접 API 호출 스크립트만 주의 |
+| OpenCode 실사용(도구 호출 포함 작업) | ✅ Glob/Read 도구 호출·한국어 응답 정상 |
+| 동시성 부하(8×3, 20×3 라운드) | ✅ **84/84(100%)**, 평균 지연 1.73s/2.69s, OOM·오류 없음 |
+| GPU | 88,976MiB 사용 / **여유 8.27GB**(0.17.1 때 6.05GB보다 증가 — KV 메모리 회계 효율화 효과) |
+
+**결과: 운영 스택이 v0.20.2로 전환 완료.** 같은 하드웨어·같은 모델·같은 util로 KV 토큰 용량
++64%(풀컨텍스트 동시성 3.55x→5.8x), GPU 여유 +2.2GB, 처리량 +3.5%를 얻었다. 30분 소크 테스트
+(§11.10 방법론)는 다음 사용량 한산 시간대에 실행 권장(잔여 과제). fp8 KV 채택(용량 3.3배)은
+소크 테스트와 함께 Phase 3에서 결정.
+
 | 구분 | 산출물 |
 |------|------|
 | IaC | `docker-compose.yml`, `.env(.example)` |

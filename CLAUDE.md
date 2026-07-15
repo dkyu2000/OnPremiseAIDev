@@ -22,6 +22,9 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
    - CUDA **12.8 이상** (13.0 가능) — 제안서의 "CUDA 12.4"는 Blackwell에 부족. 사용 금지.
    - NVIDIA Driver **570 이상** — 제안서의 "v550"은 부족.
    - PyTorch **2.6+ (cu128)**, vLLM **v0.17.0 이상** (SM120 전용 FP8 GEMM 최적화 포함 버전).
+     ★[2026-07-15] 운영은 **v0.20.2로 전환 완료**(완료보고서 §19.2~19.3 — KV 토큰 용량 +64%,
+     TurboQuant/fp8 KV 지원). ⚠v0.20.2부터 `VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1`은 "백엔드
+     강제"로 해석돼 SM120에서 **기동 거부** — 반드시 `MAIN_MXFP4_FLASHINFER=0`(자동 선택=Marlin).
    - **FlashAttention 3는 Blackwell 미지원** → Llama 등 일반 모델은 `VLLM_FLASH_ATTN_VERSION=2` 설정.
    - **⚠ Gemma 2 예외:** Gemma 2(9B/27B)는 logit soft-capping 때문에 FA2 빌드가 softcap 미지원이면
      기동 실패하거나 **FlashInfer 백엔드를 요구**한다. SM120에선 FlashInfer head_size 이슈도 보고됨.
@@ -48,7 +51,7 @@ LG CNS WISE 운영팀(50인)의 폐쇄망 On-Premise AI Assistant 인프라를 *
 | OS/커널 | **Ubuntu 26.04 LTS (확정)** | 커널 7.0.0+ | 테스트=운영 동일 베이스라인 (검증장비 실측: 26.04 / 7.0.0-22-generic) |
 | 드라이버/CUDA | NVIDIA 570+ / CUDA 12.8+ | — | Blackwell 필수 |
 | 컨테이너 | Docker + Docker Compose + nvidia-container-toolkit | — | — |
-| 추론 엔진 | **vLLM v0.17.0+** | `VLLM_FLASH_ATTN_VERSION=2` | NGC `nvcr.io/nvidia/pytorch` 기반 이미지 권장 |
+| 추론 엔진 | **vLLM v0.20.2**(2026-07-15 전환, 구 v0.17.1) | `MAIN_MXFP4_FLASHINFER=0` 필수 | `VLLM_FLASH_ATTN_VERSION`은 0.20.2에서 무시됨(경고만) |
 | 게이트웨이 | **LiteLLM — OSS(무료) 전용** (지원 라인 1.86~1.89 중 1개 고정) | PostgreSQL 백엔드 | Enterprise 기능 미사용 |
 | PII 마스킹 | **Presidio** (자체 호스팅) | LiteLLM `guardrail: presidio` | 폐쇄망 가능한 유일한 OSS PII 경로 |
 | 키/스펜드 DB | PostgreSQL | — | LiteLLM 가상 키·사용량 |
