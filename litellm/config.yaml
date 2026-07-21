@@ -17,12 +17,23 @@
 #    served-model-name(=compose의 --served-model-name)을 openai/<name>으로 지정
 # ──────────────────────────────────────────────────────────────────────────
 model_list:
-  # 메인 — Llama 3.3-70B-Instruct FP8 (운영 채택, phase-prod). MAIN_MODEL_PATH로 검증(8B)/운영(70B) 전환.
-  - model_name: main-gptoss
+  # 메인 — MAIN_MODEL_PATH/MAIN_SERVED_NAME으로 선택지(A/D/E/G/L/S 등) 전환, served-model-name 고정 아님.
+  - model_name: main-nemotron
     litellm_params:
-      model: openai/main-gptoss
+      model: openai/main-nemotron
       api_base: http://vllm-main:8000/v1
       api_key: "dummy"            # vLLM은 키 불필요(형식상 값)
+      # ★[2026-07-21] fake_stream 필수 — LiteLLM 공식 버그(BerriAI/litellm #25389, 1.89.0 기준 미해결):
+      #   vLLM이 스트리밍 종료 시 finish_reason 청크 뒤에 별도로 usage만 담긴 빈 choices:[] 청크를
+      #   보내는데(OpenAI 스펙), LiteLLM이 finish_reason을 보자마자 스트림 소비를 멈춰 그 usage 청크를
+      #   통째로 버림 → OpenCode 등 클라이언트의 Context/토큰/비용 패널이 항상 0으로 고정되는 원인이었음
+      #   (vllm-main 8000 포트 직접 스트리밍 테스트로 vLLM은 정상 전송함을 확인, LiteLLM 통과 시에만 소실
+      #   되는 것까지 재현 확인). fake_stream: true로 LiteLLM→vLLM 요청을 non-streaming으로 바꿔
+      #   완전한 응답(+usage 포함)을 통짜로 받은 뒤 클라이언트에는 그걸 잘게 쪼개 스트리밍처럼 흉내냄 —
+      #   usage 유실은 해결되지만 TTFT(첫 토큰까지 시간)가 늘어남(Nemotron은 답변 전 reasoning이 길어
+      #   체감 지연이 더 큼). 상세 트레이드오프·중계 프록시 대안 설계는 완료보고서 §19.12, 사용자
+      #   매뉴얼 "OpenCode 토큰/비용 표시 안 됨" 항목 참조.
+      fake_stream: true
     model_info:
       mode: chat
 

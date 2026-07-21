@@ -1623,6 +1623,93 @@ Upstage Solar Open 100B(102B/12B active MoE, 커뮤니티 NVFP4 양자화 `Firwo
 이은 **두 번째이자 마지막 실패 사례**(VRAM 용량 초과). 최종 검증 결과: 13개 모델 중 **11개 성공,
 2개 실패**.
 
+### 19.12 선택지 L(Nemotron) 실전검증(OpenCode 실사용) — 발견 버그 4건 및 조치 (2026-07-20~21)
+
+승격 후보 Nemotron-3-Super(선택지 L)를 사용자가 OpenCode로 실제 개발 작업(OpenSpec `apply` 워크플로,
+스케줄 앱/Todo 앱 구현)에 투입해 실전검증하는 과정에서 인프라 버그 4건을 발견·조치했다. 격리된
+PoC/소크 테스트만으로는 드러나지 않고 **장시간 에이전틱 세션에서만 나타나는 유형**이라는 공통점이
+있다 — 향후 다른 선택지(H/S)를 실전검증할 때도 동일 클래스의 문제가 재현될 수 있으므로 점검 순서를
+남겨둔다.
+
+**① `--reasoning-parser` 누락 — CoT 원문이 content에 그대로 노출**
+- 증상: 모든 응답에 "We need to continue working on the task..." 식 원문 사고과정이 답변 본문에
+  섞여 나옴(세션 제목 생성 결과에서도 동일 증상). 매 턴 대화 히스토리에 CoT 전문이 누적되어 컨텍스트
+  소모 속도가 비정상적으로 빨라짐.
+- 원인: vLLM에 Nemotron 전용 파서(`nemotron_v3`, `DeepSeekR1ReasoningParser` 상속)가 이미 내장돼
+  있으나 `option-l.env` 최초 등록 시 `--reasoning-parser` 인자 자체를 빠뜨림.
+- 조치: `MAIN_EXTRA_ARGS`에 `--reasoning-parser nemotron_v3` 추가. 재기동 후 `reasoning_content`가
+  `content`와 분리되어 응답되는 것을 curl로 직접 확인.
+
+**② 장시간 세션 컨텍스트 초과 — 압축(compaction) 요청 자체가 거부됨**
+- 증상: OpenSpec `apply` 작업이 tasks.md 특정 섹션에서 진행이 멈춘 것처럼 보임. 사용자에게는 별도
+  에러 표시 없이 그냥 응답이 안 옴.
+- 원인: vllm-main 로그에서 `VLLMValidationError: 입력 61,441 + 출력 4096 > max-model-len(65536)`
+  확인. OpenCode가 컨텍스트 한도 근처에서 자동 압축(요약)을 시도하는데, 압축 요청 자체의 입력이 이미
+  한도를 넘겨 vLLM이 400으로 거부 — 압축이 컨텍스트를 줄이기는커녕 실패만 하고 끝나 계속 정지 상태로
+  보임.
+- 조치(①과 별개, 근본적 여유 확보): Nemotron의 `max_position_embeddings`는 262,144(256K)로 65536은
+  gpt-oss(E) 설정을 그대로 물려받은 값일 뿐 모델/KV 한계가 아님을 확인. `--max-model-len`을
+  65536→**131072**로, 클라이언트 컨텍스트(`opencode.json`)도 60000→**120000**으로 동반 상향(여유
+  마진 5,536→11,072로 2배 이상 확보). 재기동 후 KV 풀은 오히려 2,459,160토큰(기존 1,986,244보다
+  커짐, 131072 기준 동시성 18.76x)으로 실측, curl E2E 정상.
+- ①·② 모두 적용 후 재현: 별도 세션(`test_prj_schedule_Nemotron-3_fail`)에서 동일 유형의 400
+  컨텍스트 초과가 재발했으나 이번엔 **재시도로 15초 내 자동 복구**됨(①로 CoT 누적 속도가 줄어든
+  덕에 완전 정지까지는 안 갔지만, 근본적으로 여유 마진이 계속 소진되는 구조 자체는 남아있어 ②의
+  128K 확장이 유효한 추가 안전판임).
+
+**③ presidio-analyzer 컨테이너 순간 재시작 → PII 가드레일 500 (원인 미확정, 모니터링 항목)**
+- 증상: litellm 로그에 `Presidio PII analysis failed: ServerDisconnectedError` /
+  `ClientConnectorError(Connection refused)` 500 에러 2건.
+- 조사: `docker events`로 `presidio-analyzer`가 정확히 그 시각에 `die`(exitCode 143=SIGTERM)
+  →1초 후 `start`로 재시작한 것을 확인. 컨테이너 자체 로그엔 재시작 직전 예외 트레이스가 없고(직전까지
+  정상 INFO 로그), 헬스체크도 설정돼 있지 않으며(§docker-compose.yml presidio-analyzer 서비스),
+  이 세션 중 해당 컨테이너를 조작한 스크립트도 없어 **트리거를 특정하지 못함**.
+- 조치: 근본 수정 보류(재현 시 재조사) — 다만 OpenCode/사용자 요청은 자체 재시도로 무사 통과됨
+  (LiteLLM `num_retries: 2` 또는 클라이언트 재시도로 추정). 재발 빈도가 늘면 presidio-analyzer에
+  헬스체크·재시작 알림을 추가하는 것을 권장.
+
+**④ OpenCode Context/토큰/비용 패널이 항상 "0 tokens / 0% used / $0.00" — LiteLLM 스트리밍 usage
+유실 (2건 중첩 버그, 몽키패치로 조치)**
+- 증상: OpenCode 사이드바의 Context/토큰/비용이 실제 대화 진행과 무관하게 항상 0으로 고정.
+- 원인 A(업스트림 버그 1, BerriAI/litellm [#25389](https://github.com/BerriAI/litellm/issues/25389),
+  1.89.0 기준 미해결): vLLM은 OpenAI 스펙대로 스트리밍 종료 시 `finish_reason` 청크 뒤에 별도로
+  `usage`만 담긴 빈 `choices:[]` 청크를 추가로 보내는데, LiteLLM이 `finish_reason`을 보는 즉시 스트림
+  소비를 멈춰버려 그 usage 청크를 통째로 버림. vllm-main(8000) 직접 스트리밍 테스트로 vLLM 쪽은
+  정상 전송함을 확인, LiteLLM을 거치면 사라지는 것까지 재현 확인.
+- 1차 시도(설정만으로 우회): `litellm/config.yaml`의 main-nemotron `litellm_params`에
+  `fake_stream: true` 추가 — LiteLLM→vLLM 요청을 non-streaming으로 바꿔 완전한 응답(+usage)을
+  통짜로 받은 뒤 클라이언트에는 그걸 흉내내어 스트리밍처럼 전달하는 방식. 원인 A는 우회되지만
+  **원인 B(별개의 업스트림 버그)를 새로 만남**: `llms/base_llm/base_model_iterator.py`의
+  `convert_model_response_to_streaming()`이 완결된 `ModelResponse`를 스트리밍 청크로 변환할 때
+  `id`/`object`/`created`/`model`/`choices`만 복사하고 **`usage`를 빠뜨림** — 소스 추적으로 확인.
+  결과: `fake_stream: true`를 걸어도 여전히 usage 미전달(재현 확인).
+- 2차 조치(몽키패치): `litellm/audit_logger.py`(기존에 콜백으로 이미 로드되는 파일)에
+  `convert_model_response_to_streaming`을 감싸 `model_response.usage`를 결과 청크에 복사해 넣는
+  몽키패치 추가. sync/async 두 fake_stream 경로(`MockResponseIterator`) 모두 같은 모듈 함수를
+  참조하므로 패치 하나로 양쪽 다 적용됨(단, `presidio.py`/`main.py` 등에서 별도로 `from ... import`한
+  참조는 패치 범위 밖 — 우리 경로엔 영향 없음, §자세한 내용은 `audit_logger.py` 주석 참조).
+  재기동 후 curl 스트리밍 테스트로 `usage` 필드가 최종 청크에 정상 포함되는 것을 확인.
+- **트레이드오프(사용자 확인 후 채택)**: `fake_stream: true`는 LiteLLM→vLLM 요청 자체를
+  non-streaming으로 바꾸므로 **TTFT(첫 토큰까지 시간)가 늘어난다** — Nemotron은 답변 전 reasoning이
+  길 때가 많아 체감 지연이 더 클 수 있음(첫 토큰이 오기 전까지 화면에 아무것도 안 뜨다가 한번에
+  쏟아지는 형태로 바뀜). 사용자가 "간단한 설정 우선 적용 + 추후 중계서버로 전환 준비"를 명시적으로
+  선택.
+- **추후 전환 예정(미구현, 설계만 기록): 중계 프록시 방식.** vllm-main과 litellm 사이에 경량
+  reverse proxy를 하나 더 두고, vLLM이 보내는 마지막 두 청크(`finish_reason` 청크 + 별도 `usage`
+  청크)를 프록시 단에서 하나로 병합해 LiteLLM에 전달한다. 이렇게 하면 원인 A(LiteLLM이 두 번째 청크를
+  못 읽는 문제)가 애초에 발생하지 않아 **진짜 토큰 단위 실시간 스트리밍을 유지하면서** usage도
+  정상 전달된다 — `fake_stream`의 TTFT 저하 없이 근본 해결. 요구되는 작업: (1) 프록시 서비스 코드
+  (vLLM SSE를 파싱해 `choices`가 있는 마지막 청크와 그다음 `usage`-only 청크를 만나면 하나로 합쳐
+  재전송하는 경량 asyncio/aiohttp 서버, 수십 줄 규모), (2) `docker-compose.yml`에 서비스 추가(예:
+  `stream-usage-fix`, vllm-main과 같은 `ai-net` 네트워크), (3) `litellm/config.yaml`의
+  `api_base`를 `http://vllm-main:8000/v1` → 신규 프록시 주소로 변경 + `fake_stream: true` 제거 +
+  `audit_logger.py`의 몽키패치 블록 제거(더 이상 필요 없어짐), (4) 순수 스트리밍 재검증(청크 수·TTFT·
+  usage 값 정합성). 선택지 L 뿐 아니라 G/H/S 등 다른 모든 모델에도 동일하게 적용 가능한 범용 해결책
+  (모델별이 아니라 게이트웨이 레벨 문제이므로) — 구현 시 `litellm/config.yaml`의 모델별
+  `fake_stream: true`를 전부 걷어내고 `api_base`만 프록시로 일괄 전환하면 됨.
+- 사용자 매뉴얼(`docs/USER_GUIDE.md`) "OpenCode 토큰/비용 표시" 항목에 임시 조치 상태와 증상 재현
+  시 확인 방법을 함께 기록.
+
 | 구분 | 산출물 |
 |------|------|
 | IaC | `docker-compose.yml`, `.env(.example)` |

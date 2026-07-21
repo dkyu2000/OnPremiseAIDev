@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "litellm-onprem/main-gptoss",
+  "model": "litellm-onprem/main-nemotron",
   "provider": {
     "litellm-onprem": {
       "npm": "@ai-sdk/openai-compatible",
@@ -10,10 +10,10 @@
         "apiKey": "{env:OPENCODE_LITELLM_KEY}"
       },
       "models": {
-        "main-gptoss": {
-          "name": "Main — gpt-oss-120b (선택지 G: 단독, FIM 없음)",
+        "main-nemotron": {
+          "name": "Main — Nemotron-3-Super-120B (선택지 L: NVFP4 단독)",
           "limit": {
-            "context": 60000,
+            "context": 120000,
             "output": 4096
           }
         }

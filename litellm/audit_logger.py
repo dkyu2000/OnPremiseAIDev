@@ -52,6 +52,39 @@ except Exception:  # pragma: no cover - 폐쇄망 이미지에 부재할 수 있
     logger.warning("audit_logger: asyncpg 미설치 → Audit/이상탐지 콜백 비활성화. 이미지에 asyncpg 반입 필요.")
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# ★[2026-07-21] fake_stream usage 유실 몽키패치 (LiteLLM 1.89.0 자체 버그, 임시 조치)
+#   litellm/config.yaml 의 main-nemotron 에 fake_stream: true 를 걸어(§19.12) OpenCode 등 클라이언트의
+#   Context/토큰/비용 패널이 항상 0으로 뜨던 문제(BerriAI/litellm #25389 — vLLM이 finish_reason 청크와
+#   별도로 usage만 담긴 빈 choices:[] 청크를 보내는데 LiteLLM이 finish_reason을 보자마자 스트림을 그만
+#   읽어서 그 usage 청크를 통째로 버림)를 우회하려 했으나, fake_stream 자체도 별개의 버그가 있었다:
+#   llms/base_llm/base_model_iterator.py::convert_model_response_to_streaming() 가 완결된
+#   ModelResponse 를 스트리밍 청크로 변환할 때 id/object/created/model/choices 만 복사하고 usage 를
+#   빠뜨린다(실전검증서 2026-07-21 소스 추적으로 확인). 그 결과 fake_stream: true 를 걸어도 여전히
+#   usage 가 전달되지 않았음. 아래는 그 변환 함수에 usage 복사를 추가하는 몽키패치.
+#   근본 해결책은 완료보고서 §19.12의 중계 프록시(vLLM의 finish_reason 청크 + usage 청크를 병합해
+#   LiteLLM에 하나로 전달) 전환 — 그 전까지 이 패치로 임시 완화. LiteLLM 버전을 올리면(1.86~1.89 선
+#   안에서 상위 패치, 또는 그 이상) 이 패치가 여전히 필요한지 재검증할 것 — usage 가 패치 없이도
+#   정상 전달되면 이 블록은 제거.
+try:
+    from litellm.llms.base_llm import base_model_iterator as _bmi
+
+    _orig_convert_model_response_to_streaming = _bmi.convert_model_response_to_streaming
+
+    def _convert_model_response_to_streaming_with_usage(model_response):
+        chunk = _orig_convert_model_response_to_streaming(model_response)
+        usage = getattr(model_response, "usage", None)
+        if usage is not None:
+            chunk.usage = usage
+        return chunk
+
+    _bmi.convert_model_response_to_streaming = _convert_model_response_to_streaming_with_usage
+    logger.info("audit_logger: fake_stream usage 몽키패치 적용됨(litellm #25389 우회, 완료보고서 §19.12)")
+except Exception:  # pragma: no cover - 몽키패치 실패해도 요청 처리 자체는 계속되어야 함
+    logger.warning("audit_logger: fake_stream usage 몽키패치 적용 실패 — 원본 동작으로 폴백", exc_info=True)
+# ──────────────────────────────────────────────────────────────────────────
+
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id            BIGSERIAL PRIMARY KEY,
