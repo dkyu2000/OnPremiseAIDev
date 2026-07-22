@@ -82,15 +82,23 @@ mkdir -p ~/.config/opencode
 cp AGENTS.md.example ~/.config/opencode/AGENTS.md   # 저장소의 AGENTS.md.example 사용
 ```
 
-그리고 `~/.config/opencode/opencode.jsonc`(전역 설정, 없으면 새로 생성)에 아래 한 줄을 추가:
+그리고 `~/.config/opencode/opencode.jsonc`(전역 설정, 없으면 새로 생성)에 아래 내용을 추가:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "instructions": ["/home/<사용자계정>/.config/opencode/AGENTS.md"]
+  "instructions": ["/home/<사용자계정>/.config/opencode/AGENTS.md"],
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "nohup *": "deny",
+      "* &": "deny"
+    }
+  }
 }
 ```
 경로는 반드시 **절대경로**로 쓰세요(`~`는 인식되지 않습니다). 이후로는 어떤 프로젝트에서 OpenCode를
-켜든 모든 응답과 산출물(OpenSpec 문서 포함)이 한국어로 작성됩니다.
+켜든 모든 응답과 산출물(OpenSpec 문서 포함)이 한국어로 작성됩니다. `permission.bash`는 §3의
+개발 서버 백그라운드 기동 문제에 대한 **기술적 강제 장치**입니다 — 아래 §3에서 이어서 설명합니다.
 
 ### 사용
 ```bash
@@ -111,15 +119,22 @@ OpenCode에게 "백엔드 서버 켜줘" 식으로 시키면 `nohup python app.p
 됐다고 판단하는 데 문제가 있는 것으로 보이는, **현재까지 근본 해결책이 없는 클라이언트 쪽 한계**입니다.
 증상: 몇 분씩 응답이 없다가 결국 타임아웃되거나, 직접 `esc`로 중단해야 함.
 
-**★2026-07-22부터 별도 지시 없이도 자동 방지됩니다.** 전역 설정 파일(`~/.config/opencode/AGENTS.md`,
-배포용 원본은 `AGENTS.md.example`)에 "서버를 bash로 직접 백그라운드 기동하지 말고, 테스트 코드
-(pytest fixture / Jest beforeAll·afterAll)가 서버 생명주기를 프로그래밍적으로 관리하게 할 것"이라는
-지침을 추가해뒀습니다 — 새 세션을 시작하면 자동으로 적용되며, 실제로 신규 세션에서 이 지침을 정확히
-인지하는 것까지 확인했습니다. 즉 이제는 사용자가 매번 "직접 켜지 말고 테스트로 관리해줘"라고 요청할
-필요 없이, OpenCode가 알아서 pytest fixture나 Jest `beforeAll`/`afterAll`로 서버를 띄우고 정리합니다.
+**★[2026-07-22 1차] 전역 지침(AGENTS.md)으로 시도했으나 프롬프트만으로는 불완전함이 실측 확인됨.**
+전역 설정 파일(`~/.config/opencode/AGENTS.md`, 배포용 원본은 `AGENTS.md.example`)에 "서버를 bash로
+직접 백그라운드 기동하지 말 것" 지침을 추가하고, 신규 세션이 이 지침을 **복창(인지)**하는 것까지는
+확인했었습니다. 하지만 실제 사용 세션(2026-07-22 오전)에서 `nohup npm run dev`/`nohup node index.js`
+시도가 2시간 넘게 20회 가까이 반복 재현됨 — **지침 인지와 실행 시 준수는 별개**였습니다(LLM 지침
+순응은 확률적이라 프롬프트만으로는 100% 보장되지 않음). `permission` 설정이 아예 없어 모든 bash
+명령이 기술적으로 무조건 자동 allow였던 것이 근본 원인.
 
-혹시 그래도 이 증상이 재현되면(예: 아주 오래된 세션이라 전역 지침이 반영되기 전 대화 맥락이 남아있는
-경우), 아래처럼 직접 지시해서 우회할 수 있습니다:
+**★[2026-07-22 2차, 확정] `permission.bash`로 기술적 강제 추가.** 위 "설정" 절의 `opencode.jsonc`
+예시처럼 `nohup *`, `* &` 패턴을 `"deny"`로 지정하면 OpenCode가 지침을 "따르길 바라는" 수준이 아니라
+**명령 자체가 실행되지 않고 즉시 차단**됩니다. 이제는 사용자가 매번 요청할 필요 없이, 이 두 패턴을
+치려는 시도 자체가 막히므로 OpenCode가 pytest fixture나 Jest `beforeAll`/`afterAll` 같은 대안으로
+전환할 수밖에 없습니다.
+
+혹시 그래도 이 증상이 재현되면(예: 전역 설정 반영 전 세션이거나 `permission` 블록을 아직 추가하지
+않은 경우), 아래처럼 직접 지시해서 우회할 수 있습니다:
 ```
 서버를 매번 nohup으로 수동 기동하지 말고, 테스트의 beforeAll/afterAll(또는 pytest fixture)에서
 프로세스를 직접 띄우고 포트 응답을 폴링한 뒤 진행하도록 만들어줘. 이후로는 서버를 bash 명령으로
