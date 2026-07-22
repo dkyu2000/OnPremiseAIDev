@@ -91,7 +91,26 @@ cp AGENTS.md.example ~/.config/opencode/AGENTS.md   # 저장소의 AGENTS.md.exa
     "bash": {
       "*": "allow",
       "nohup *": "deny",
-      "* &": "deny"
+      "* &": "deny",
+      "*node index.js*": "deny",
+      "*node server.js*": "deny",
+      "*node app.js*": "deny",
+      "*python app.py*": "deny",
+      "*python server.py*": "deny",
+      "*python manage.py runserver*": "deny",
+      "*flask run*": "deny",
+      "*uvicorn *": "deny",
+      "*gunicorn *": "deny",
+      "*npm run dev*": "deny",
+      "*npm start*": "deny",
+      "*npm run start*": "deny",
+      "*yarn dev*": "deny",
+      "*yarn start*": "deny",
+      "*pnpm dev*": "deny",
+      "*pnpm start*": "deny",
+      "*vite*": "deny",
+      "*next dev*": "deny",
+      "*ng serve*": "deny"
     }
   }
 }
@@ -127,14 +146,24 @@ OpenCode에게 "백엔드 서버 켜줘" 식으로 시키면 `nohup python app.p
 순응은 확률적이라 프롬프트만으로는 100% 보장되지 않음). `permission` 설정이 아예 없어 모든 bash
 명령이 기술적으로 무조건 자동 allow였던 것이 근본 원인.
 
-**★[2026-07-22 2차, 확정] `permission.bash`로 기술적 강제 추가.** 위 "설정" 절의 `opencode.jsonc`
-예시처럼 `nohup *`, `* &` 패턴을 `"deny"`로 지정하면 OpenCode가 지침을 "따르길 바라는" 수준이 아니라
-**명령 자체가 실행되지 않고 즉시 차단**됩니다. 이제는 사용자가 매번 요청할 필요 없이, 이 두 패턴을
-치려는 시도 자체가 막히므로 OpenCode가 pytest fixture나 Jest `beforeAll`/`afterAll` 같은 대안으로
-전환할 수밖에 없습니다.
+**★[2026-07-22 2차] `permission.bash`로 기술적 강제 추가했으나 최초엔 `nohup */* &`만 막아 우회됨.**
+`nohup ...&` 문법만 막아뒀더니, 실제로는 모델이 `&` 없이 **foreground로 `python app.py`를 그냥 실행**해
+동일하게 도구가 멈추는 사례가 재현됨. `nohup`/`&` 같은 "문법"이 아니라 Flask/Node/npm 등 **실제
+서버 기동 명령 자체**를 막아야 한다는 뜻이었습니다.
 
-혹시 그래도 이 증상이 재현되면(예: 전역 설정 반영 전 세션이거나 `permission` 블록을 아직 추가하지
-않은 경우), 아래처럼 직접 지시해서 우회할 수 있습니다:
+**★[2026-07-22 3차, 확정] 서버 기동 명령 패턴을 폭넓게 deny 처리.** 위 "설정" 절의 `opencode.jsonc`
+예시처럼 `python app.py`/`node index.js`/`npm run dev`/`flask run`/`uvicorn` 등 흔한 개발 서버 진입점을
+전부 `"deny"`로 지정 — **명령 자체가 실행되지 않고 즉시 차단**됩니다. 신규 세션에서 실제로 `python
+app.py` 기동 요청 시 명령을 시도하지도 않고 "도구 제한으로 권장되지 않음, 별도 터미널에서 실행하거나
+테스트의 `subprocess.Popen`으로 관리하라"고 스스로 안내하는 것까지 실측 확인.
+
+**⚠ 중요: `opencode.jsonc`의 `permission` 설정은 OpenCode가 이미 열려 있는 세션에는 소급 적용되지
+않습니다** — 설정 파일은 **세션(창) 시작 시점에 한 번만** 읽습니다. `permission` 블록을 수정한
+뒤에는 반드시 **열려 있는 OpenCode 창을 모두 닫고 새로 시작**해야 새 규칙이 적용됩니다(실측:
+설정 파일을 고쳐도 기존에 떠 있던 창은 여전히 이전 규칙으로 동작해 새 패턴이 무시됨).
+
+혹시 새 세션에서도 이 증상이 재현되면(예: 위 목록에 없는 낯선 프레임워크의 서버 시작 명령), 아래처럼
+직접 지시해서 우회할 수 있습니다:
 ```
 서버를 매번 nohup으로 수동 기동하지 말고, 테스트의 beforeAll/afterAll(또는 pytest fixture)에서
 프로세스를 직접 띄우고 포트 응답을 폴링한 뒤 진행하도록 만들어줘. 이후로는 서버를 bash 명령으로
