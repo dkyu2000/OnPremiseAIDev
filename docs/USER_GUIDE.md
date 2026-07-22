@@ -108,7 +108,11 @@ cp AGENTS.md.example ~/.config/opencode/AGENTS.md   # 저장소의 AGENTS.md.exa
       "*yarn start*": "deny",
       "*pnpm dev*": "deny",
       "*pnpm start*": "deny",
-      "*vite*": "deny",
+      "vite": "deny",
+      "vite *": "deny",
+      "npx vite*": "deny",
+      "*&& vite*": "deny",
+      "*&& npx vite*": "deny",
       "*next dev*": "deny",
       "*ng serve*": "deny"
     }
@@ -173,6 +177,14 @@ app.py` 기동 요청 시 명령을 시도하지도 않고 "도구 제한으로 
 않습니다** — 설정 파일은 **세션(창) 시작 시점에 한 번만** 읽습니다. `permission` 블록을 수정한
 뒤에는 반드시 **열려 있는 OpenCode 창을 모두 닫고 새로 시작**해야 새 규칙이 적용됩니다(실측:
 설정 파일을 고쳐도 기존에 떠 있던 창은 여전히 이전 규칙으로 동작해 새 패턴이 무시됨).
+
+**★[2026-07-22 정정] `*<키워드>*` 형태의 넓은 패턴은 오탐(false positive)을 냅니다.** 처음에
+`"*vite*": "deny"`로 넣었더니 `grep vite`처럼 서버 기동과 전혀 무관한 명령까지 막혀버리는 게
+실측 확인됐습니다(`vite.config.js`를 읽거나 검색하는 것도 전부 차단됨). 명령 전체 문자열에 대한
+glob 매칭이라 "부분 문자열만 겹쳐도" 막히기 때문입니다. 위 예시처럼 `"vite": "deny"`(단독 실행),
+`"vite *": "deny"`(인자 포함), `"npx vite*"`, `"*&& vite*"`처럼 **실제 실행 형태로 좁혀서** 지정하세요.
+새 deny 패턴을 추가할 때는 항상 "이 키워드가 들어간 무해한 명령(`grep`/`cat`/`ls` 등)이 있을까?"를
+먼저 점검하는 걸 권장합니다.
 
 혹시 새 세션에서도 이 증상이 재현되면(예: 위 목록에 없는 낯선 프레임워크의 서버 시작 명령), 아래처럼
 직접 지시해서 우회할 수 있습니다:
