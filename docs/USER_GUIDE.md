@@ -112,12 +112,24 @@ cp AGENTS.md.example ~/.config/opencode/AGENTS.md   # 저장소의 AGENTS.md.exa
       "*next dev*": "deny",
       "*ng serve*": "deny"
     }
+  },
+  "agent": {
+    "compaction": {
+      "prompt": "{file:./prompts/compaction-ko.txt}"
+    }
   }
 }
 ```
+그리고 `~/.config/opencode/prompts/compaction-ko.txt`를 만들고 저장소의 `compaction-ko-prompt.txt.example`
+내용을 그대로 복사해 넣으세요:
+```bash
+mkdir -p ~/.config/opencode/prompts
+cp compaction-ko-prompt.txt.example ~/.config/opencode/prompts/compaction-ko.txt
+```
 경로는 반드시 **절대경로**로 쓰세요(`~`는 인식되지 않습니다). 이후로는 어떤 프로젝트에서 OpenCode를
 켜든 모든 응답과 산출물(OpenSpec 문서 포함)이 한국어로 작성됩니다. `permission.bash`는 §3의
-개발 서버 백그라운드 기동 문제에 대한 **기술적 강제 장치**입니다 — 아래 §3에서 이어서 설명합니다.
+개발 서버 백그라운드 기동 문제에 대한 **기술적 강제 장치**이고, `agent.compaction.prompt`는 아래
+§4(응답이 한글/영어로 왔다갔다 하는 문제)에서 설명하는 원인 하나를 막는 장치입니다.
 
 ### 사용
 ```bash
@@ -170,6 +182,30 @@ app.py` 기동 요청 시 명령을 시도하지도 않고 "도구 제한으로 
 직접 켜지 말고 항상 이 테스트를 통해서만 실행해줘.
 ```
 가장 확실한 건 **새 세션을 시작하는 것**입니다 — 낡은 대화 맥락 없이 전역 지침이 바로 적용됩니다.
+
+### ⚠ 주의사항: 응답이 한글/영어로 왔다갔다 하는 문제
+
+AGENTS.md의 언어 지침이 있어도 가끔 응답이 영어로 나오는 경우가 실측 확인됐습니다(2026-07-22).
+원인은 두 가지입니다.
+
+**① 컨텍스트 자동 요약(compaction)이 AGENTS.md를 아예 안 받음.** OpenCode는 대화가 길어지면
+`compaction`이라는 **내장(native) 전용 에이전트**가 과거 맥락을 요약합니다. 이 에이전트는 자체
+하드코딩된 영어 프롬프트("Respond in the same language as the conversation")를 쓰고, 사용자가
+설정한 `instructions`(AGENTS.md)를 아예 참조하지 않습니다 — "대화와 같은 언어로"라는 약한 지시만
+있다 보니, 요약 대상 맥락이 영어 코드/로그/도구 출력 위주면 모델이 영어로 요약해버립니다. 위
+"설정" 절의 `opencode.jsonc` 예시처럼 `agent.compaction.prompt`로 이 내장 프롬프트를 한국어 강제
+문구가 포함된 버전(`compaction-ko-prompt.txt.example`)으로 교체하면 해결됩니다 — `opencode debug
+agent compaction`으로 실제 반영 여부 확인 가능.
+
+**② Plan 모드·장문 세션에서의 지침 이탈(확률적, 완전 해결 불가).** Plan 모드는 별도 프롬프트
+오버라이드가 없어 AGENTS.md 지침을 정상적으로 받지만, 컨텍스트가 5만 토큰 이상으로 커지고 그
+대부분이 영어 코드/로그일 때 모델이 한국어 지침보다 주변 맥락의 언어에 끌려가는 경우가 있습니다
+(LLM 지침 순응은 확률적이라 100% 보장되지 않음 — 개발 서버 기동 문제와 같은 근본 원인). AGENTS.md에
+"컨텍스트가 아무리 길고 영어투성이여도 예외 없이 한국어로 답한다"는 문구를 추가해뒀지만 이건 완화일
+뿐 완전한 차단은 아닙니다. 재현되면 "한국어로 답해줘"라고 짧게 다시 요청하면 즉시 정상화됩니다.
+
+**⚠ `permission` 항목과 마찬가지로 `agent.compaction.prompt`도 이미 열려 있는 세션에는 소급 적용되지
+않습니다** — 설정 변경 후 OpenCode를 재시작하세요.
 
 ### 확장 기능 (플러그인 / MCP 서버)
 
